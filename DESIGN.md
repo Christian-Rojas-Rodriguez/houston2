@@ -149,6 +149,75 @@ The MVP seeds at least one template (e.g. sales) to demonstrate this.
 returned (the `general` layer of the user's own org excepted). This test failing = isolation
 broke.
 
+### 3.1 Permissions as a graph
+
+The base rule above is a **tree**: `org → group → agent`, with the fixed reachability
+`org = mine AND group ∈ { general, mine }`. The MVP enforces exactly this tree, and the leak
+test proves it. But "manage permissions for N orgs / N groups / N users" — and the eventual
+need for **controlled sharing** (one group lending context to another, or a firm sharing a
+template with a client org) — is naturally a **graph**, not a tree.
+
+**Model.** Nodes are `users`, `groups`, `orgs`, `agents`; edges are the membership/ownership
+relations plus explicit, admin-granted **share edges**. A user may read a resource iff a path
+exists under the visibility rule — and **no path crosses an org boundary unless an explicit
+share edge was created by an admin of the source.**
+
+Concrete MVP instance (2 orgs · 2 groups · 3 users) — no edge crosses Org 1 ↔ Org 2, so
+isolation holds *by construction*:
+
+```mermaid
+graph TD
+    subgraph Org1["Organization 1"]
+        g1["general"]
+        A(("User A")) -->|member_of| G1["Group 1"]
+        B(("User B")) -->|member_of| G2["Group 2"]
+        G1 -->|part_of| g1
+        G2 -->|part_of| g1
+    end
+    subgraph Org2["Organization 2"]
+        g2["general"]
+        C(("User C")) -->|member_of| G3["Group 1"]
+        G3 -->|part_of| g2
+    end
+```
+
+- **User A** reads `Org1/general` + `Org1/Group 1` — never `Org1/Group 2`, never `Org2/*`.
+- **User B** reads `Org1/general` + `Org1/Group 2` — never `Org1/Group 1`, never `Org2/*`.
+- **User C** reads `Org2/general` + `Org2/Group 1` — never anything in `Org1`.
+
+**The share edge (the graph generalization).** Controlled sharing is one extra table — the
+edges of the graph — plus one extra `OR` branch in the policy. The common case stays
+join-free:
+
+```sql
+CREATE TABLE context_shares (
+  id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  source_type text NOT NULL CHECK (source_type IN ('org','group','agent')),
+  source_id   uuid NOT NULL,
+  target_type text NOT NULL CHECK (target_type IN ('org','group','agent')),
+  target_id   uuid NOT NULL,
+  permission  text NOT NULL DEFAULT 'read' CHECK (permission IN ('read','write')),
+  created_by  uuid REFERENCES auth.users(id),   -- must be an admin of `source`
+  created_at  timestamptz DEFAULT now(),
+  UNIQUE (source_id, target_id)
+);
+
+-- Visibility = base tree rule  OR  an explicit inbound share edge.
+CREATE POLICY context_visibility ON contexts FOR SELECT USING (
+     ( org_id = (auth.jwt()->>'org_id')::uuid
+       AND group_id IN ((auth.jwt()->>'group_id')::uuid, 'general'::uuid) )
+  OR id IN (
+       SELECT source_id FROM context_shares
+       WHERE target_id IN ((auth.jwt()->>'group_id')::uuid, (auth.jwt()->>'org_id')::uuid)
+     )
+);
+```
+
+`context_shares` is itself RLS-protected: only an admin of the **source** entity may create an
+edge. **MVP note:** the MVP ships and tests only the **base tree rule** (no share rows) — the
+share-edge mechanism is documented here as the deliberate path to controlled sharing and is
+exercised post-MVP.
+
 ---
 
 ## 4. Context hydration (MVP)
@@ -224,6 +293,11 @@ perform the user's own OAuth; a pure API-key loop, Option C, does not).
 GPU work happens sandbox-side; Cloud Run as the GCP-native baseline. Figures are May 2026
 research — re-verify (pricing drifts).
 
+**Warm pool (latency).** Whichever platform we pick, a small pool of pre-booted, *unassigned*
+instances kept ready (then bound to a tenant at request time and torn down after) hides
+cold-start latency without sacrificing per-tenant isolation. Pool sizing is a post-MVP tuning
+knob.
+
 ## C. Provider accounts & billing — Bring Your Own Account (BYOA)
 
 Mirrors how [Houston](https://github.com/gethouston/houston) does it today.
@@ -283,6 +357,25 @@ skills assembly) is reused **as-is**; we only add a hydrate-before / sync-after 
 learnings **anti-injection** sanitization (`learnings_context.rs`: drop "ignore previous
 instructions"-style entries, strip control chars, cap ~4 000 chars) runs in-instance — keep it.
 
+### D.1 Event sourcing — immutable context history (post-MVP)
+
+v1 mutations are destructive (`learnings.json` overwritten, `context-ledger.json` replaced).
+For an enterprise multi-tenant platform we likely want an append-only log instead: every
+context mutation becomes an immutable event (`context_events`: `org_id`, `group_id`,
+`agent_id`, `event_type`, `payload jsonb`, `actor_id`, `session_id`), RLS-scoped like every
+other table.
+
+| Capability | How |
+|---|---|
+| **Rollback** | Replay events up to a timestamp to reconstruct agent state. |
+| **Audit trail** | Who changed what, when, in which session — enterprise compliance. |
+| **Cross-agent reactivity** | Agent B subscribes to Agent A's context-change stream. |
+| **Conflict resolution** | Concurrent sessions (see §E) merge event streams instead of last-writer-wins on whole files. |
+
+In the hydrate → sync cycle: **sync-back emits a diff event per change** instead of
+overwriting; periodic **snapshots** compact the log so hydration doesn't replay everything.
+The in-instance anti-injection sanitization is unchanged.
+
 ## E. Open decisions / next steps
 
 - **Runtime pick** (Appendix A): A / B / C — for post-MVP, once we leave the local terminal.
@@ -291,6 +384,11 @@ instructions"-style entries, strip control chars, cap ~4 000 chars) runs in-inst
 - **Cost isolation:** AI spend resolved by BYOA (Appendix C). Open: *compute* cost isolation
   (shared ephemeral vs dedicated per tenant).
 - **Groups:** controlled list per org, or free-form labels?
+- **Controlled sharing (graph, §3.1):** when to enable `context_shares` edges; who may grant
+  them; are cross-org shares allowed, or group-to-group within an org only? (MVP = base tree
+  rule, no shares.)
+- **Context history (§D.1):** adopt event sourcing for audit/rollback/cross-agent reactivity,
+  or keep simple file overwrite? (MVP = overwrite.)
 - **Agent storage shape:** MVP uses **Storage objects** (buckets). Post-MVP, consider
   normalizing definition + state into Postgres (queryable, RLS-granular) — likely hybrid.
 - **Sync timing** (post-MVP): end-of-session vs write-through.

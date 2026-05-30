@@ -100,6 +100,35 @@ It can never read anything from another organization.
 - **Templates** are the one shared, cross-tenant artifact — but they are **read-only**, and
   once instantiated the resulting agent is fully org/group-scoped.
 
+### Permissions as a graph
+
+The rule above is the **base case** — a tree (`org → group → agent`). The full model is a
+**graph**: users, groups, orgs and agents are nodes; membership and ownership are edges; and
+**controlled sharing** (one group lending context to another, a firm sharing with a client
+org) is an explicit edge an admin creates. The isolation invariant: **no path crosses an
+organization boundary unless such an edge exists.** The MVP enforces the base tree (no share
+edges) and the leak test proves it; the share edges are the documented path to N-org / N-group
+sharing (mechanism in [`DESIGN.md`](./DESIGN.md) §3.1).
+
+```mermaid
+graph TD
+    subgraph Org1["Organization 1"]
+        g1["general"]
+        A(("User A")) -->|member_of| G1["Group 1"]
+        B(("User B")) -->|member_of| G2["Group 2"]
+        G1 -->|part_of| g1
+        G2 -->|part_of| g1
+    end
+    subgraph Org2["Organization 2"]
+        g2["general"]
+        C(("User C")) -->|member_of| G3["Group 1"]
+        G3 -->|part_of| g2
+    end
+```
+
+No edge crosses Org 1 ↔ Org 2 → **User C can never reach Org 1 data, and Users A/B can never
+reach Org 2 data**; within Org 1, A and B share only `general`.
+
 ---
 
 ## MVP scope & the leak test
