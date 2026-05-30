@@ -1,31 +1,173 @@
-# Houston 2.0 — Design (HOW)
+# Houston 2.0 — Context (What, Why & How)
 
-> `README.md` describes **what** we are building and **why**. This document describes **how**.
-> It is **MVP-focused**: the spine (§1–§5) is the isolation-demo MVP we are building now. The
-> broader exploration — runtime options, hosting candidates, billing, full agent lifecycle —
-> is preserved in the **Appendix** (post-MVP).
+> A platform to host AI agents in a multi-tenant setup. A single orchestrator serves 1..N
+> agents for multiple organizations, guaranteeing that no organization can access another's
+> data, while agents within the same organization share a structured common knowledge base.
+>
+> This single document is the **what**, the **why**, and the **how**. Part I is the what/why,
+> Part II is the how (MVP), and the Appendix records post-MVP exploration.
 
 ---
 
-## 1. Purpose & relationship to the README
+# Part I — What & Why
 
-The README is the *what/why*; this is the *how*. The MVP's job is to **prove data isolation**
-between users, organizations, and groups, and to show how the flow generalizes to N orgs / N
-groups / N users.
+## What we're building (MVP first)
+
+The first deliverable is an **isolation demo**: the platform running for multiple
+organizations and groups at once, proving that tenants are fully isolated and showing how the
+design generalizes to **N orgs / N groups / N users**.
+
+**First cut:** 2 organizations · 2 groups · 3 users.
+
+Two tenant-isolated use cases are in scope:
+
+1. **Create an agent** — blank, from a shared **template** (e.g. a sales agent), AI-assisted,
+   or imported from GitHub. Every new agent is written scoped to the creator's org + group,
+   isolated from other tenants from birth.
+2. **Run an agent** — a request (prompt + optional files) is answered by an agent that only
+   ever sees its own org + group context.
+
+For the MVP this runs **locally** (no VPS): a **Go orchestrator**, **Supabase** (Postgres +
+Storage, both with Row-Level Security) as the data layer, and **Claude Code in the local
+terminal** as the runtime. See Part II for the flows and diagrams.
+
+## Why
+
+1. **Isolation is first-class, not an afterthought.** Every piece of data is born associated
+   with an organization and a group. There is no ownerless data.
+2. **Isolation is enforced by the data layer, not just the application.** Even if a bug lets a
+   malformed query through, the storage layer must not return another organization's data.
+   RLS in Postgres **and** Storage is the hard guarantee.
+3. **An agent is a configuration, not a process.** Creating an agent means registering a
+   definition in Supabase, not spinning up a machine.
+4. **Shared knowledge is explicit.** Common knowledge is a declared category (`general` /
+   group) with clear rules about who can read it.
+5. **The MVP proves it.** Success = a test that fails the moment isolation breaks (see below).
+
+## High-level picture
+
+```mermaid
+flowchart TB
+    subgraph T["Tenants (MVP: 2 orgs · 2 groups · 3 users)"]
+      U1["User A — Org 1 / Group 1"]
+      U2["User B — Org 1 / Group 2"]
+      U3["User C — Org 2 / Group 1"]
+    end
+    O(("Orchestrator (Go)"))
+    R["Claude Code — local runtime (MVP)"]
+    DB[("Supabase — Postgres RLS + Storage buckets RLS")]
+    U1 -->|request / response| O
+    U2 -->|request / response| O
+    U3 -->|request / response| O
+    O <-->|prompt · context| DB
+    O <-->|upload · context · inference| R
+```
+
+## Domain model
+
+| Concept | Description |
+|---|---|
+| **Organization** | The tenant. The unit of isolation. |
+| **Group** | A subdivision within an org. There is always a special `general` group plus any number of functional groups (e.g. `developers`, `sales`). |
+| **Agent** | An agent instance: identity, instructions, configuration. Belongs to one org and one group. |
+| **Template** | A reusable agent blueprint in a **shared, read-only catalog** (e.g. a sales agent). Instantiated *into* an org/group, where the resulting agent is tenant-isolated. |
+| **Knowledge / files** | Documents, skills, scripts associated with an org + group, stored in Supabase Storage buckets. |
+| **Membership** | The relationship between a user and the org + group they belong to. Defines what they can see. |
+| **Prompt / Conversation** | A request and its interaction history with an agent. |
+
+## The isolation model
+
+The central rule of the entire system:
+
+```
+An agent in group G, inside organization O, can read data where:
+
+    organization = O   AND   group ∈ { general, G }
+
+It can never read anything from another organization.
+```
+
+- **Across organizations:** total isolation. No exceptions, no admin mode that crosses the
+  boundary.
+- **Within an organization:** `general` knowledge is visible to all agents in the org; group
+  knowledge is visible only to that group; two groups cannot see each other (except via
+  `general`).
+- **Templates** are the one shared, cross-tenant artifact — but they are **read-only**, and
+  once instantiated the resulting agent is fully org/group-scoped.
+
+### Permissions as a graph
+
+The rule above is the **base case** — a tree (`org → group → agent`). The full model is a
+**graph**: users, groups, orgs and agents are nodes; membership and ownership are edges; and
+**controlled sharing** (one group lending context to another, a firm sharing with a client
+org) is an explicit edge an admin creates. The isolation invariant: **no path crosses an
+organization boundary unless such an edge exists.** The MVP enforces the base tree (no share
+edges) and the leak test proves it; the share edges are the documented path to N-org / N-group
+sharing (mechanism in §2.1).
+
+Concrete MVP instance (2 orgs · 2 groups · 3 users) — no edge crosses Org 1 ↔ Org 2, so
+isolation holds *by construction*:
+
+```mermaid
+graph TD
+    subgraph Org1["Organization 1"]
+        g1["general"]
+        A(("User A")) -->|member_of| G1["Group 1"]
+        B(("User B")) -->|member_of| G2["Group 2"]
+        G1 -->|part_of| g1
+        G2 -->|part_of| g1
+    end
+    subgraph Org2["Organization 2"]
+        g2["general"]
+        C(("User C")) -->|member_of| G3["Group 1"]
+        G3 -->|part_of| g2
+    end
+```
+
+- **User A** reads `Org1/general` + `Org1/Group 1` — never `Org1/Group 2`, never `Org2/*`.
+- **User B** reads `Org1/general` + `Org1/Group 2` — never `Org1/Group 1`, never `Org2/*`.
+- **User C** reads `Org2/general` + `Org2/Group 1` — never anything in `Org1`.
+
+## MVP scope & the leak test
+
+**Scope:** 2 organizations, 2 groups, 3 users.
+
+**The proof — the leak test.** Seed data for Org A and Org B (with their groups), act as a
+user in Org A / Group 1, and assert that **not a single row and not a single Storage object**
+from Org B — or from another non-`general` group of Org A — is returned. If isolation breaks,
+this test fails. This is the acceptance gate for the MVP.
+
+## Roadmap
+
+- **Milestone 1 — the isolation cut (MVP, local).** Data model with org + group on every unit;
+  RLS in Postgres and Storage; create-agent and run-agent flows; the leak test passes. Runs
+  locally with the Go orchestrator + Supabase + Claude Code.
+- **Post-MVP — operations & scale.** Managed/ephemeral cloud hosting, retrieval (pgvector
+  semantic search), per-tenant observability and usage limits, horizontal scale. Options and
+  research are recorded in the Appendix.
+
+## Out of scope (for now)
+
+- A specific end-user interface (desktop, mobile, web).
+- Real billing integration (provider accounts cover AI spend; see Appendix C — BYOA).
+- Cloud/ephemeral hosting and hardware-level isolation (post-MVP).
+- Retrieval optimization / semantic search — the MVP sends all org+group context.
+
+---
+
+# Part II — How (MVP)
+
+The MVP's job is to **prove data isolation** between users, organizations, and groups, and to
+show how the flow generalizes to N orgs / N groups / N users.
 
 **MVP shape (decided):** no VPS, runs **local**; a **Go orchestrator**; **Supabase** as the
 data layer (**Postgres + RLS** for identity/agents/prompts, **Storage buckets + RLS** for
 agent files); and **Claude Code in the local terminal** as the runtime. No semantic
 search/RAG yet — the orchestrator gathers and sends *all* of a tenant's org+group context.
+Cloud hosting, ephemeral sandboxes, billing, and the full hydrate/sync agent lifecycle are
+**deferred to the Appendix**.
 
-**MVP scope:** 3 users · 2 organizations · 2 groups.
-
-Everything about cloud hosting, ephemeral sandboxes, billing, and the full hydrate/sync agent
-lifecycle is **deferred to the Appendix**.
-
----
-
-## 2. MVP use cases & flows (the spine)
+## 1. MVP use cases & flows (the spine)
 
 Two tenant-isolated use cases, both in the MVP: **(a) create an agent** and **(b) run an agent
 (request → inference)**. Shared MVP simplifications:
@@ -37,12 +179,12 @@ Two tenant-isolated use cases, both in the MVP: **(a) create an agent** and **(b
 - **No RAG** — gather and send *all* org+group context.
 - **Scope** 3 users / 2 orgs / 2 groups; **goal** = prove isolation + show N-generalization.
 
-### 2.1 Agent creation (write path)
+### 1.1 Agent creation (write path)
 
 As in v1, the creation paths converge on one thing — **persist an agent definition to
 Supabase, scoped to org/group** (an `agents` row + objects under
 `houston/{org_id}/{group_id}/agents/{agent_id}/`). The MVP supports the v1 sources: **blank**,
-**from template** (the shared catalog, §3), **AI-assist** (one-shot `CLAUDE.md` generation via
+**from template** (the shared catalog, §2), **AI-assist** (one-shot `CLAUDE.md` generation via
 the provider), and **GitHub import** (fetch a repo's `houston.json` + files). The created
 agent is **tenant-isolated from birth**.
 
@@ -69,7 +211,7 @@ sequenceDiagram
     O-->>U: agent created (id)
 ```
 
-### 2.2 Run an agent (request → inference)
+### 1.2 Run an agent (request → inference)
 
 The detailed async flow. MVP simplifications above apply.
 
@@ -102,11 +244,9 @@ sequenceDiagram
 > on the (slow) runtime boot — it launches Claude Code and, in parallel, fetches the org+group
 > context from Supabase. Only when both branches complete does it send the prompt.
 
----
+## 2. Data model & isolation (MVP)
 
-## 3. Data model & isolation (MVP)
-
-Supabase is where the README's *"isolation enforced by the data layer"* becomes concrete.
+Supabase is where the *"isolation enforced by the data layer"* principle becomes concrete.
 
 **Postgres tables** (every tenant row carries `org_id` + `group_id`):
 
@@ -117,7 +257,7 @@ Supabase is where the README's *"isolation enforced by the data layer"* becomes 
 - `prompts` / `conversations` — request + interaction history.
 
 **RLS** is keyed on the requesting user's membership (org_id/group_id read from the JWT claims
-or via a `security definer` helper), enforcing the README's central rule:
+or via a `security definer` helper), enforcing the central rule:
 
 ```
 org = mine  AND  group ∈ { general, mine }
@@ -149,41 +289,19 @@ The MVP seeds at least one template (e.g. sales) to demonstrate this.
 returned (the `general` layer of the user's own org excepted). This test failing = isolation
 broke.
 
-### 3.1 Permissions as a graph
+### 2.1 Permissions as a graph
 
 The base rule above is a **tree**: `org → group → agent`, with the fixed reachability
 `org = mine AND group ∈ { general, mine }`. The MVP enforces exactly this tree, and the leak
-test proves it. But "manage permissions for N orgs / N groups / N users" — and the eventual
-need for **controlled sharing** (one group lending context to another, or a firm sharing a
-template with a client org) — is naturally a **graph**, not a tree.
+test proves it (the concrete 2-org / 2-group / 3-user graph is drawn in Part I). But "manage
+permissions for N orgs / N groups / N users" — and the eventual need for **controlled sharing**
+(one group lending context to another, or a firm sharing a template with a client org) — is
+naturally a **graph**, not a tree.
 
 **Model.** Nodes are `users`, `groups`, `orgs`, `agents`; edges are the membership/ownership
 relations plus explicit, admin-granted **share edges**. A user may read a resource iff a path
 exists under the visibility rule — and **no path crosses an org boundary unless an explicit
 share edge was created by an admin of the source.**
-
-Concrete MVP instance (2 orgs · 2 groups · 3 users) — no edge crosses Org 1 ↔ Org 2, so
-isolation holds *by construction*:
-
-```mermaid
-graph TD
-    subgraph Org1["Organization 1"]
-        g1["general"]
-        A(("User A")) -->|member_of| G1["Group 1"]
-        B(("User B")) -->|member_of| G2["Group 2"]
-        G1 -->|part_of| g1
-        G2 -->|part_of| g1
-    end
-    subgraph Org2["Organization 2"]
-        g2["general"]
-        C(("User C")) -->|member_of| G3["Group 1"]
-        G3 -->|part_of| g2
-    end
-```
-
-- **User A** reads `Org1/general` + `Org1/Group 1` — never `Org1/Group 2`, never `Org2/*`.
-- **User B** reads `Org1/general` + `Org1/Group 2` — never `Org1/Group 1`, never `Org2/*`.
-- **User C** reads `Org2/general` + `Org2/Group 1` — never anything in `Org1`.
 
 **The share edge (the graph generalization).** Controlled sharing is one extra table — the
 edges of the graph — plus one extra `OR` branch in the policy. The common case stays
@@ -218,9 +336,7 @@ edge. **MVP note:** the MVP ships and tests only the **base tree rule** (no shar
 share-edge mechanism is documented here as the deliberate path to controlled sharing and is
 exercised post-MVP.
 
----
-
-## 4. Context hydration (MVP)
+## 3. Context hydration (MVP)
 
 How the orchestrator assembles what Claude Code receives:
 
@@ -231,14 +347,12 @@ How the orchestrator assembles what Claude Code receives:
 3. Send the prompt.
 
 **MVP = send everything** — no selection, no embeddings, no semantic search. (Retrieval
-optimization with pgvector is post-MVP; see Appendix D/E.)
+optimization with pgvector is post-MVP; see the Appendix.)
 
 Creating an agent **from a template** copies the shared `templates/` files into the tenant
-prefix first (§3); from then on hydration reads only the tenant's own org/group objects.
+prefix first (§2); from then on hydration reads only the tenant's own org/group objects.
 
----
-
-## 5. Local dev / running the MVP
+## 4. Local dev / running the MVP
 
 What it takes to run the MVP locally:
 
@@ -304,8 +418,8 @@ Mirrors how [Houston](https://github.com/gethouston/houston) does it today.
 
 **Principle.** No platform-wide AI API keys, no token reselling. Each org/user **connects
 their own provider account** (Anthropic / OpenAI / Google); AI usage is billed by the provider
-**directly to that account**. This resolves the README's *cost isolation* question for AI
-spend: the billing boundary is the provider account itself, per tenant.
+**directly to that account**. This resolves the *cost isolation* question for AI spend: the
+billing boundary is the provider account itself, per tenant.
 
 **Two distinct "logins":** (A) **Houston user identity** — Supabase Auth + OAuth (PKCE);
 (B) **provider / "service account"** — provider CLI OAuth, orchestrated headless. "Billing
@@ -384,7 +498,7 @@ The in-instance anti-injection sanitization is unchanged.
 - **Cost isolation:** AI spend resolved by BYOA (Appendix C). Open: *compute* cost isolation
   (shared ephemeral vs dedicated per tenant).
 - **Groups:** controlled list per org, or free-form labels?
-- **Controlled sharing (graph, §3.1):** when to enable `context_shares` edges; who may grant
+- **Controlled sharing (graph, §2.1):** when to enable `context_shares` edges; who may grant
   them; are cross-org shares allowed, or group-to-group within an org only? (MVP = base tree
   rule, no shares.)
 - **Context history (§D.1):** adopt event sourcing for audit/rollback/cross-agent reactivity,
