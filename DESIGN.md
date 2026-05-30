@@ -3,7 +3,7 @@
 > `README.md` describes **what** we are building and **why**. This document describes **how**:
 > the runtime model, the hosting/sandbox candidates, and how Supabase enforces isolation.
 > It is a decision-support document — the final runtime and hosting picks are still open
-> (see §6).
+> (see §7).
 
 ---
 
@@ -131,7 +131,9 @@ itself (call model → check for tool calls → execute → repeat).
 
 **Recommendation lean (not final):** **Option A** preserves the README's stateless-engine
 model with the least custom plumbing, because session/memory persistence is a documented
-file artifact we move in and out of Supabase. Decide in §6.
+file artifact we move in and out of Supabase. The **BYOA billing model (§6)** reinforces
+Option A: it requires running the provider CLI / Agent SDK to perform the user's own OAuth,
+which a pure API-key loop (Option C) does not do. Decide in §7.
 
 ---
 
@@ -193,13 +195,80 @@ Supabase is where the README's *"isolation enforced by the data layer"* becomes 
 
 ---
 
-## 6. Open decisions / next steps
+## 6. Provider accounts & billing — Bring Your Own Account (BYOA)
+
+This mirrors how [Houston](https://github.com/gethouston/houston) handles it today.
+
+**Principle.** Houston 2.0 holds **no platform-wide AI API keys** and does not resell tokens.
+Each organization/user **connects their own provider account** (Anthropic / OpenAI / Google),
+and AI usage is billed by the provider **directly to that connected account**. This is the
+concrete answer to the README's *cost isolation* open question for AI spend: the billing
+boundary is the provider account itself, per tenant. Our own usage metering (§2) stays for
+insight/limits, not for charging tokens.
+
+**Two distinct "logins" — do not conflate them.**
+
+| | Sense | Mechanism |
+|---|---|---|
+| **A** | **Houston user identity** (who is logged into the platform) | Supabase Auth + OAuth (e.g. Google), PKCE |
+| **B** | **Provider / "service account"** (the AI account that runs the agents and pays for usage) | Provider CLI OAuth, orchestrated headless by the control plane |
+
+"Service account" / "billing login" = **B**. We replicate Houston's flow B.
+
+**How the connection works (headless relay).** The runtime authenticates by running the
+provider's own CLI and letting the provider's OAuth take over. Our instances run in a cloud
+sandbox with **no browser**, so we always use the **headless** path Houston built for its
+remote/VPS engines:
+
+1. Control plane launches the provider CLI as a subprocess with stdin/stdout piped.
+2. It reads stdout line-by-line, **strips ANSI**, and extracts the first **HTTPS login URL**
+   → emits it to the client over WebSocket.
+3. The user authorizes in their own browser and either:
+   - **pastes back** the resulting code (Claude) → control plane writes `code\n` to stdin, or
+   - uses a **device-code** the CLI prints (Codex `--device-auth`); the CLI polls on its own.
+4. On success the CLI writes its credentials file; the control plane reports completion over WS.
+
+Exact per-provider commands (from Houston):
+
+| Provider | Connect command | Flow | Credentials file |
+|---|---|---|---|
+| **Anthropic / Claude** | `claude auth login --claudeai` | paste-back | `~/.claude/.credentials.json` |
+| **OpenAI / Codex** | `codex login --device-auth -c ...` (remote) | device-code | `~/.codex/auth.json` |
+| **Google / Gemini** | JSON-RPC `authenticate` over `--acp` (no login subcommand), or API key | browser / key | `~/.gemini/oauth_creds.json` or `~/.gemini/.env` |
+
+**How it fits our ephemeral / hydrated model.** The provider credentials file is just another
+piece of **per-org/user hydrated state** (like `~/.claude` memory in §3):
+
+- Stored **encrypted in Supabase**, scoped to one org/user, reachable only with that tenant's
+  short-lived scoped token (§5).
+- **Hydrated** into the ephemeral instance's home (`~/.claude/.credentials.json`, etc.) at
+  start; **synced back** if the token is refreshed.
+- The **connect/login relay** runs as a control-plane provisioning step — the Go control plane
+  plays the role Houston's Rust `engine-core` does (launch CLI, capture URL, emit WS events,
+  write stdin). "Stateless engine" still holds: credentials live in Supabase, not on the
+  instance.
+- **Status / logout** mirror Houston: `claude auth status` / `codex login status`, falling back
+  to reading the credentials file; logout clears it and flips the tenant back to "Connect".
+
+**Isolation consequence.** A tenant's provider credentials never enter another tenant's
+instance, because hydration is gated by the same per-instance scoped token (§5). A compromised
+instance cannot spend another org's provider account.
+
+**Interaction with §3.** BYOA via provider-CLI OAuth requires actually running the provider
+CLI / Agent SDK → it reinforces **Option A**. A pure **Option C** (Go-native loop on our own
+API key) implies a *different* billing model (platform API billing, not the user's
+account/subscription) and would not use this connect flow.
+
+---
+
+## 7. Open decisions / next steps
 
 - **Runtime pick** (§3): A / B / C.
 - **Hosting pick** (§4): E2B / Daytona / Modal / Cloud Run / Railway — and resolve the
   "Lambda(s)" ambiguity.
-- **Cost isolation** (README open question): is shared ephemeral compute enough, or do some
-  tenants need dedicated resources?
+- **Cost isolation** (README open question): **AI spend is now resolved by BYOA** (§6 — billed
+  to each tenant's own provider account). What remains open is *compute* cost isolation: is
+  shared ephemeral compute enough, or do some tenants need dedicated resources?
 - **Groups** (README open question): a controlled list per org, or free-form labels?
 - **Next branch after this doc:** Milestone 1 scaffold — Go control-plane skeleton + Supabase
   schema + RLS policies + the leak test. Explicitly **out of scope** for this `develop` cut
@@ -207,7 +276,14 @@ Supabase is where the README's *"isolation enforced by the data layer"* becomes 
 
 ---
 
-## 7. Resources
+## 8. Resources
+
+**Reference implementation (how Houston does it today)**
+- Houston (gethouston) — https://github.com/gethouston/houston
+  — provider connect/relay: `engine/houston-engine-core/src/provider/login_relay.rs`,
+  adapters `engine/houston-terminal-manager/src/provider/{anthropic,openai,gemini}.rs`,
+  REST `engine/houston-engine-server/src/routes/providers.rs`, frontend
+  `app/src/components/shell/provider-login-dialog.tsx`.
 
 **Runtime**
 - Claude Code headless mode — https://code.claude.com/docs/en/headless
