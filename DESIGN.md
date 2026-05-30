@@ -3,7 +3,7 @@
 > `README.md` describes **what** we are building and **why**. This document describes **how**:
 > the runtime model, the hosting/sandbox candidates, and how Supabase enforces isolation.
 > It is a decision-support document — the final runtime and hosting picks are still open
-> (see §7).
+> (see §8).
 
 ---
 
@@ -133,7 +133,7 @@ itself (call model → check for tool calls → execute → repeat).
 model with the least custom plumbing, because session/memory persistence is a documented
 file artifact we move in and out of Supabase. The **BYOA billing model (§6)** reinforces
 Option A: it requires running the provider CLI / Agent SDK to perform the user's own OAuth,
-which a pure API-key loop (Option C) does not do. Decide in §7.
+which a pure API-key loop (Option C) does not do. Decide in §8.
 
 ---
 
@@ -261,7 +261,85 @@ account/subscription) and would not use this connect flow.
 
 ---
 
-## 7. Open decisions / next steps
+## 7. Agent lifecycle — creation & personalization on Houston 2.0
+
+In Houston today an agent **is a folder on local disk**, and the filesystem is the source of
+truth: `agents_crud::create()` materializes a folder (`.houston/agent.json`, `CLAUDE.md`,
+seeds, skills, skeleton via `seed_agent()`), and personalization accumulates as **state files**
+that `build_agent_context()` re-injects into the prompt at every `sessions::start`.
+
+Houston 2.0 cannot keep the local filesystem as the source of truth — instances are ephemeral
+and multi-tenant. The reframe (which is exactly the README's *"an agent is a configuration, not
+a process"*):
+
+> **Supabase is the source of truth; the instance's disk is a materialized, throwaway working
+> copy.** Creating an agent = persisting its definition to Supabase. Running a session =
+> *hydrating* that definition into the instance, running Houston's existing filesystem logic
+> unchanged, and *syncing back* the mutated state. Personalization lives in Supabase, not on a
+> disk that disappears when the instance tears down.
+
+The payoff: **Houston's in-instance agent logic is reused as-is** (`seed_agent`,
+`build_agent_context`, the learnings/skills assembly). We only add a hydrate-before /
+sync-after wrapper at the control-plane boundary (§2).
+
+### 7.1 Artifact mapping (disk → Supabase)
+
+| Houston artifact | Nature | Houston 2.0 home |
+|---|---|---|
+| `.houston/agent.json` (id, config_id, color, ts) | definition | `agents` row + `org_id`, `group_id` |
+| `CLAUDE.md` — instructions | definition | agent definition (Postgres column or Storage object) |
+| `CLAUDE.md` — `## Learnings` section | mutable state | synced back each session |
+| `.agents/skills/` | versioned definition | Supabase Storage, per-org prefix (or a `skills` table) |
+| seeds: `outputs.json`, `routines.json`, … | initial state | written at creation, then mutable |
+| `learnings.json`, `integrations.json` | mutable state | per-agent state, hydrated/synced |
+| `config/context-ledger.json` ("what the agent knows about you") | mutable knowledge | candidate for the org/group knowledge layer + pgvector (§5) |
+| `activity.json`, `routine_runs` | append-only log | per-agent state table |
+| `agent-schemas` JSON Schemas | static contract | embedded at build — **not** per-tenant |
+| `AGENTS.md` / `GEMINI.md` symlinks | derived | recreated in-instance by `seed_agent()` — not stored |
+
+### 7.2 Creation — the four paths still converge
+
+In Houston, blank / "create with AI" / store / GitHub all converge on `create()`. In Houston
+2.0 they converge on **"persist the agent definition to Supabase"** (scoped to org + group):
+
+- **AI-assist** (`generate_instructions.rs`, cheap model, 60 s one-shot) runs in the control
+  plane or a short-lived instance **using the tenant's BYOA credentials (§6)** — so even
+  agent-authoring generation is billed to the user's own account.
+- **Store / GitHub install** fetches `houston.json` + `CLAUDE.md` + `icon.png` + skills,
+  validates `id`, and stores those as Supabase objects scoped to the org (replacing Houston's
+  "installed directory on disk").
+- The result of every path is a definition record, never a long-lived process.
+
+### 7.3 Session & personalization — hydrate → run → sync back
+
+1. Control plane resolves tenant context (org + group) and mints the scoped token (§5).
+2. Provisions an instance and **hydrates** the agent folder from Supabase **and** the BYOA
+   provider credentials (§6) into the instance home.
+3. **In-instance, unchanged Houston logic:** `seed_agent()` (idempotent) →
+   `build_agent_context()` assembles the prompt (Working Directory, mode file, learnings,
+   skills index, workspace context, used integrations).
+4. Runs the session via the chosen runtime (§3).
+5. **Syncs back** the mutated state (`learnings.json`, `integrations.json`,
+   `context-ledger.json`, `CLAUDE.md ## Learnings`, routines/activity) to Supabase.
+6. Tears down (scale to zero).
+
+The learnings **anti-injection** sanitization (`learnings_context.rs`: drop "ignore previous
+instructions"-style entries, strip control chars, cap ~4 000 chars, mark as background data)
+runs in-instance and composes with our tenant isolation — keep it as-is.
+
+### 7.4 What changes vs Houston
+
+- **Source of truth:** local disk → Supabase; the instance disk is an ephemeral cache.
+- **Multi-tenancy:** every agent carries `org_id` + `group_id`; RLS (§5) enforces isolation.
+- **Workspace:** in Houston just a folder grouping agents; here it becomes a tenant-scoped
+  grouping — a natural candidate to map onto the README's **group**, with "workspace context"
+  → group knowledge and `context-ledger` → general/group knowledge in pgvector (§5).
+
+New decisions this raises are folded into §8.
+
+---
+
+## 8. Open decisions / next steps
 
 - **Runtime pick** (§3): A / B / C.
 - **Hosting pick** (§4): E2B / Daytona / Modal / Cloud Run / Railway — and resolve the
@@ -270,13 +348,21 @@ account/subscription) and would not use this connect flow.
   to each tenant's own provider account). What remains open is *compute* cost isolation: is
   shared ephemeral compute enough, or do some tenants need dedicated resources?
 - **Groups** (README open question): a controlled list per org, or free-form labels?
+- **Agent storage shape** (§7): mirror the agent folder as opaque Storage objects (fast port,
+  least logic) vs. normalize into Postgres tables (queryable, RLS-granular, more mapping work).
+  Likely hybrid: definition + state in Postgres, large/opaque blobs (skills, icons) in Storage.
+- **Sync timing** (§7): persist state at end-of-session vs. write-through on every change
+  (durability vs. chattiness).
+- **Session concurrency** (§7): Houston assumes a single writer per agent folder; multi-tenant
+  may run concurrent sessions of one agent → need a strategy (single active-session lock,
+  last-writer-wins, or session forking).
 - **Next branch after this doc:** Milestone 1 scaffold — Go control-plane skeleton + Supabase
   schema + RLS policies + the leak test. Explicitly **out of scope** for this `develop` cut
   (design doc only).
 
 ---
 
-## 8. Resources
+## 9. Resources
 
 **Reference implementation (how Houston does it today)**
 - Houston (gethouston) — https://github.com/gethouston/houston
