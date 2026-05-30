@@ -1,395 +1,324 @@
 # Houston 2.0 — Design (HOW)
 
-> `README.md` describes **what** we are building and **why**. This document describes **how**:
-> the runtime model, the hosting/sandbox candidates, and how Supabase enforces isolation.
-> It is a decision-support document — the final runtime and hosting picks are still open
-> (see §8).
+> `README.md` describes **what** we are building and **why**. This document describes **how**.
+> It is **MVP-focused**: the spine (§1–§5) is the isolation-demo MVP we are building now. The
+> broader exploration — runtime options, hosting candidates, billing, full agent lifecycle —
+> is preserved in the **Appendix** (post-MVP).
 
 ---
 
 ## 1. Purpose & relationship to the README
 
-The `README.md` defines Houston 2.0's *what/why*: a multi-tenant platform hosting 1..N AI
-agents for N organizations, with hard isolation by `org + group`, a **stateless engine**, and
-a knowledge base served by semantic search. It deliberately leaves the *how* open.
+The README is the *what/why*; this is the *how*. The MVP's job is to **prove data isolation**
+between users, organizations, and groups, and to show how the flow generalizes to N orgs / N
+groups / N users.
 
-This document fills that gap, and in doing so confronts a tension the README glosses over:
+**MVP shape (decided):** no VPS, runs **local**; a **Go orchestrator**; **Supabase** as the
+data layer (**Postgres + RLS** for identity/agents/prompts, **Storage buckets + RLS** for
+agent files); and **Claude Code in the local terminal** as the runtime. No semantic
+search/RAG yet — the orchestrator gathers and sends *all* of a tenant's org+group context.
 
-> The README states **"an agent is a configuration, not a process"** and **"the engine is
-> stateless"**. But the agent runtime we actually want to run — Claude Code / the Claude
-> Agent SDK — is a **stateful process**: it has a working directory (`files, images,
-> scripts`) and a `~/.claude` home (memory, skills, commands, session history). The
-> whiteboard sketch names this pain directly: *how do we manage Claude's local files /
-> memory? how do we isolate `~/.claude`? how do we recover everything from Supabase?*
+**MVP scope:** 3 users · 2 organizations · 2 groups.
 
-**Resolution adopted here:** keep the **control plane stateless** (Go), and make each
-**agent runtime an ephemeral, hydrated-on-demand instance**. All durable state lives in
-Supabase; the instance itself is disposable. This preserves the README's "stateless engine"
-principle — it just relocates statefulness out of the long-lived process and into Supabase.
-
-In one line:
-
-```
-Houston 1:  n organizations = n VPS   (dedicated, always-on, manual, idle waste)
-Houston 2:  1 control plane + N ephemeral, isolated, hydrated micro-instances
-            (managed at the infrastructure level, scale-to-zero)
-```
+Everything about cloud hosting, ephemeral sandboxes, billing, and the full hydrate/sync agent
+lifecycle is **deferred to the Appendix**.
 
 ---
 
-## 2. Topology
+## 2. MVP use cases & flows (the spine)
 
+Two tenant-isolated use cases, both in the MVP: **(a) create an agent** and **(b) run an agent
+(request → inference)**. Shared MVP simplifications:
+
+- **Runtime** = Go orchestrator opening **Claude Code in the local terminal** (subprocess),
+  launched **asynchronously**.
+- **Storage** = Supabase **Storage buckets + RLS** for agent files; **Postgres + RLS** for
+  identity, agents, and prompts.
+- **No RAG** — gather and send *all* org+group context.
+- **Scope** 3 users / 2 orgs / 2 groups; **goal** = prove isolation + show N-generalization.
+
+### 2.1 Agent creation (write path)
+
+As in v1, the creation paths converge on one thing — **persist an agent definition to
+Supabase, scoped to org/group** (an `agents` row + objects under
+`houston/{org_id}/{group_id}/agents/{agent_id}/`). The MVP supports the v1 sources: **blank**,
+**from template** (the shared catalog, §3), **AI-assist** (one-shot `CLAUDE.md` generation via
+the provider), and **GitHub import** (fetch a repo's `houston.json` + files). The created
+agent is **tenant-isolated from birth**.
+
+```mermaid
+sequenceDiagram
+    actor U as User (org, group)
+    participant O as Orchestrator (Go)
+    participant DB as Supabase (Postgres + Storage · RLS)
+
+    U->>O: create agent (name, source: blank | template | AI-assist | github)
+    O->>O: derive tenant context (org_id, group_id)
+    alt from template
+        O->>DB: read shared templates/ catalog (read-only)
+        DB-->>O: template files (CLAUDE.md, skills, seeds)
+    else AI-assist
+        O->>O: one-shot generate CLAUDE.md (provider, cheap model)
+    else github import
+        O->>O: fetch repo houston.json + CLAUDE.md + skills
+    else blank
+        O->>O: minimal CLAUDE.md skeleton
+    end
+    O->>DB: write definition → agents row + houston/{org}/{group}/agents/{id}/* (RLS-scoped)
+    DB-->>O: ok
+    O-->>U: agent created (id)
 ```
-Client
-  │  request carrying a verifiable identity
-  ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  Go control plane  (stateless)                                         │
-│  • auth: verify identity, derive tenant context (org + group)          │
-│  • mint a SHORT-LIVED token scoped to exactly one org/group            │
-│  • provision / route to an ephemeral sandbox instance                  │
-│  • meter usage                                                         │
-└───────────────┬────────────────────────────────────────────────────────┘
-                │ provisions
-                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  Ephemeral sandbox instance  (disposable)                              │
-│  1. hydrate workspace + ~/.claude from Supabase (scoped to org/group)  │
-│  2. run the agent  (runtime = open decision, see §3)                   │
-│  3. sync outputs / session / memory / usage back to Supabase           │
-│  4. tear down (scale to zero when idle)                                │
-└───────────────┬────────────────────────────────────────────────────────┘
-                │ read (scoped token) / write
-                ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  Supabase  =  the hard isolation boundary                              │
-│  Postgres + RLS   ·   pgvector   ·   Storage buckets   ·   Auth        │
-└──────────────────────────────────────────────────────────────────────┘
+
+### 2.2 Run an agent (request → inference)
+
+The detailed async flow. MVP simplifications above apply.
+
+```mermaid
+sequenceDiagram
+    actor U as User (org, group)
+    participant O as Orchestrator (Go)
+    participant DB as Supabase (Postgres + Storage · RLS)
+    participant CC as Claude Code (local · MVP)
+
+    U->>O: request — prompt + new files (verified identity)
+    O->>O: derive tenant context (org_id, group_id)
+    O->>DB: persist prompt + uploaded files (scoped to org/group)
+
+    par async runtime spin-up
+        O->>CC: launch runtime (MVP: open Claude Code in terminal)
+        CC-->>O: ready
+    and gather context (in parallel)
+        O->>DB: fetch ALL org+group context (.md, skills.md, agents.md, scripts) — no RAG
+        DB-->>O: context (RLS: org = mine AND group ∈ {general, mine})
+    end
+
+    O->>CC: hydrate workspace + send prompt
+    CC->>CC: inference
+    CC-->>O: result
+    O-->>U: response
 ```
 
-**Mapping back to README principles:**
-
-| README principle | How this topology satisfies it |
-|---|---|
-| "The engine is stateless." | The Go control plane holds no state; every instance is hydrated from Supabase and torn down. |
-| "Isolation is enforced by the data layer." | Postgres RLS + per-instance scoped token are the hard guarantee; the control plane is the first barrier. |
-| "Compute cost only appears when an agent receives a request." | Ephemeral instances scale to zero; we pay only while an agent is actively working. |
-| "An agent is a configuration, not a process." | The *definition* (instructions, skills, knowledge scope) lives in Supabase; the process is a transient detail hydrated from that definition. |
+> The `par … and … end` block is what "async" means here: the orchestrator does **not** block
+> on the (slow) runtime boot — it launches Claude Code and, in parallel, fetches the org+group
+> context from Supabase. Only when both branches complete does it send the prompt.
 
 ---
 
-## 3. Runtime — three options to research (NOT yet decided)
-
-How the agent loop actually runs. These are presented as candidates to evaluate, not a
-settled choice.
-
-### Option A — Claude Agent SDK (headless)
-
-The same agentic loop and tools that power Claude Code, run non-interactively (`-p` /
-`query()` async generator). Claude-native memory, skills, subagents, extended thinking, and
-prompt caching are wired in — we don't rebuild them.
-
-- **Key cross-host fact:** to move a session across hosts, persist
-  `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` to durable storage and restore it
-  (to the same `cwd`) before calling `resume`. This is the concrete answer to *"isolate
-  `~/.claude`"* and *"recover everything from Supabase"*: `~/.claude` becomes a **hydrated
-  artifact stored in Supabase**, not a long-lived disk.
-- **Best when:** we want Claude-native agent behavior with the least custom plumbing.
-- **Trade-off:** ties the runtime to Claude; the session/memory persistence contract is ours
-  to operate.
-- **Resources:**
-  - https://code.claude.com/docs/en/headless
-  - https://platform.claude.com/docs/en/agent-sdk/sessions
-  - https://platform.claude.com/docs/en/agent-sdk/hosting
-
-### Option B — Vercel AI SDK (Agent abstraction)
-
-A TypeScript toolkit for AI-powered apps. Its `Agent` abstraction defines reusable agents
-with tools, instructions, and type-safe streaming, and it can use **Claude as a provider**.
-Strong fit if a web product surface (chat UI, streaming dashboards) is primary.
-
-- **Best when:** the product is web-first and we want first-class frontend streaming.
-- **Trade-off:** lighter agent layer — we own more of the loop, tool wiring, and any
-  Claude-native memory/skills we want.
-- **Complementary note:** B and Claude are not mutually exclusive — the Vercel AI SDK can run
-  the frontend/streaming with Claude as the underlying model.
-- **Resources:**
-  - https://ai-sdk.dev (Vercel AI SDK docs)
-  - https://vercel.com/docs/agent-resources/coding-agents/claude-code
-
-### Option C — Go-native loop on the Anthropic Messages API
-
-The Go control plane calls the Anthropic Messages API directly and runs the agent loop
-itself (call model → check for tool calls → execute → repeat).
-
-- **Best when:** we want a single-language stack and maximum control with minimal moving
-  parts.
-- **Trade-off:** highest build cost — we rebuild tools, skills, memory, and session
-  persistence ourselves.
-- **Resources:**
-  - https://platform.claude.com/docs/en/api/overview (Messages API)
-
-**Recommendation lean (not final):** **Option A** preserves the README's stateless-engine
-model with the least custom plumbing, because session/memory persistence is a documented
-file artifact we move in and out of Supabase. The **BYOA billing model (§6)** reinforces
-Option A: it requires running the provider CLI / Agent SDK to perform the user's own OAuth,
-which a pure API-key loop (Option C) does not do. Decide in §8.
-
----
-
-## 4. Hosting / sandbox — evaluating the founder's set
-
-Where the ephemeral instances run. Scope is the set the founder sent — **E2B, Modal,
-Daytona, Railway, Google Cloud, Lambda(s)** — explicitly **not AWS**.
-
-| Platform | Isolation | Cold start | Price (≈) | GPU | Scale-to-zero | Notes |
-|---|---|---|---|---|---|---|
-| **E2B** | Firecracker microVM, dedicated kernel (strongest) | ~150 ms | $0.0504 / vCPU-hr; Hobby tier $100 credit, 20 concurrent | No | Yes (per-sandbox) | Strongest per-tenant boundary; large catalog of community templates |
-| **Daytona** | Container by default; optional Kata/Sysbox ≈ microVM | ~27–90 ms (fastest) | $0.0504 / vCPU-hr | No | Yes | Best when per-turn cold-start latency is the bottleneck |
-| **Modal** | gVisor | — | ≈ $0.071 / vCPU-hr; 50k+ concurrent | **Yes (in-sandbox)** | Yes | The only option that can hold a GPU *inside* the sandbox |
-| **Railway** | Container PaaS | — | per-service | No | No (per service, not per session) | Great DX; weaker per-session isolation, no true per-session scale-to-zero |
-| **Google Cloud — Cloud Run** | gVisor containers, scale-to-zero | — | per-request / CPU-time | Yes (Cloud Run GPU) | Yes | GCP-native baseline; the founder's "google cloud" option |
-| **Lambda(s)** | — | — | — | depends | — | **Ambiguous** — clarify which is meant: *AWS Lambda* (excluded, it's AWS) vs *Lambda Labs* (a GPU cloud, not a per-session sandbox). Flagged for the founder. |
-
-**Lean (not final):**
-
-- **E2B** — if "isolation is first-class" (README principle 1) dominates: Firecracker with a
-  dedicated kernel per sandbox is the strongest boundary in the set.
-- **Daytona** — if a fresh sandbox spins up per turn and cold-start latency dominates the UX.
-- **Modal** — only if GPU work happens on the sandbox side (e.g. local embeddings/inference).
-- **Cloud Run** — the GCP-native baseline if the founder prefers staying inside Google Cloud.
-
-> **Note on "Lambda(s)":** the term is ambiguous. *AWS Lambda* is excluded by the
-> "not AWS" constraint. *Lambda Labs* is a GPU cloud, not a per-session sandbox primitive, so
-> it would compete with Modal for GPU workloads rather than with E2B/Daytona for isolation.
-> The founder should confirm which was intended.
-
----
-
-## 5. Supabase as the hard isolation boundary
+## 3. Data model & isolation (MVP)
 
 Supabase is where the README's *"isolation enforced by the data layer"* becomes concrete.
 
-- **Postgres + RLS** — every row carries `org_id` and `group_id`; Row-Level Security policies
-  read those from the request's JWT claims. The visibility rule from the README:
+**Postgres tables** (every tenant row carries `org_id` + `group_id`):
 
-  ```
-  org = mine  AND  group ∈ { general, mine }
-  ```
+- `organizations` — the tenant / unit of isolation.
+- `groups` — subdivisions of an org, including a special `general` group per org.
+- `memberships` — `user → org + group (+ role)`; the source of a request's tenant context.
+- `agents` — the agent definition records (id, name, config, `org_id`, `group_id`).
+- `prompts` / `conversations` — request + interaction history.
 
-  Even a malformed query cannot return another org's rows, because RLS filters before results
-  are returned.
-- **pgvector** — knowledge embeddings live in Postgres; semantic search is scoped to
-  `{ general, group }` of the requesting org by the same RLS policies.
-- **Storage buckets** — files / images / scripts stored under per-org path prefixes, with
-  storage access policies mirroring the RLS rule.
-- **Auth** — issues the identity (`user_id`, `org_id`, `grupo_id`) as JWT / `app_metadata`
-  claims that RLS and the control plane both trust.
-- **Per-instance scoped token** — each ephemeral instance receives a **short-lived credential
-  scoped to exactly one org/group** (the sketch's *"Supabase CLI tied to a user_id"*). A
-  compromised instance physically cannot read another tenant, because its token never carries
-  another tenant's claims.
-- **The leak test** — the README's Milestone 1 proof: seed Org A and Org B, act as Org A, and
-  assert that **not a single row** from Org B is returned. This is the acceptance gate for the
-  future Milestone-1 code cut.
+**RLS** is keyed on the requesting user's membership (org_id/group_id read from the JWT claims
+or via a `security definer` helper), enforcing the README's central rule:
+
+```
+org = mine  AND  group ∈ { general, mine }
+```
+
+Even a malformed query cannot return another org's rows — RLS filters before results return.
+
+**Storage bucket layout** — agent files live in buckets under per-tenant path prefixes:
+
+```
+houston/{org_id}/{group_id}/agents/{agent_id}/...   ← group-scoped agent files
+houston/{org_id}/general/...                         ← org-wide (general) layer
+templates/...                                        ← shared catalog (NOT tenant-scoped)
+```
+
+**Storage RLS policies** mirror the same `org = mine AND group ∈ {general, mine}` rule for the
+tenant prefixes.
+
+**Templates / store (shared catalog).** The original repo's bundled agent templates (e.g. a
+`sales`/`ventas` agent) live in Supabase as a **global, read-only catalog** — a `templates`
+table + a `templates/` bucket prefix that is **not** tenant-scoped (read by everyone).
+**Instantiating** a template **copies** its files (`CLAUDE.md`, skills, seeds) into the
+requesting org/group prefix, where it becomes a normal tenant-isolated agent.
+**Isolation nuance:** templates are shared read-only; agent *instances* are org/group-scoped.
+The MVP seeds at least one template (e.g. sales) to demonstrate this.
+
+**The leak test (acceptance gate).** Seed 2 orgs / 2 groups / 3 users; act as User A
+(Org1/Group1); assert that **no rows and no bucket objects** from Org2 or from Org1/Group2 are
+returned (the `general` layer of the user's own org excepted). This test failing = isolation
+broke.
 
 ---
 
-## 6. Provider accounts & billing — Bring Your Own Account (BYOA)
+## 4. Context hydration (MVP)
 
-This mirrors how [Houston](https://github.com/gethouston/houston) handles it today.
+How the orchestrator assembles what Claude Code receives:
 
-**Principle.** Houston 2.0 holds **no platform-wide AI API keys** and does not resell tokens.
-Each organization/user **connects their own provider account** (Anthropic / OpenAI / Google),
-and AI usage is billed by the provider **directly to that connected account**. This is the
-concrete answer to the README's *cost isolation* open question for AI spend: the billing
-boundary is the provider account itself, per tenant. Our own usage metering (§2) stays for
-insight/limits, not for charging tokens.
+1. List + download **all** objects under the tenant's bucket prefixes — the user's group
+   (`houston/{org}/{group}/...`) plus the org's `general` layer (`houston/{org}/general/...`).
+2. Drop them into the Claude Code working directory (`.md`, `skills.md`, `agents.md`, scripts,
+   json — the same file shapes v1 uses).
+3. Send the prompt.
 
-**Two distinct "logins" — do not conflate them.**
+**MVP = send everything** — no selection, no embeddings, no semantic search. (Retrieval
+optimization with pgvector is post-MVP; see Appendix D/E.)
 
-| | Sense | Mechanism |
-|---|---|---|
-| **A** | **Houston user identity** (who is logged into the platform) | Supabase Auth + OAuth (e.g. Google), PKCE |
-| **B** | **Provider / "service account"** (the AI account that runs the agents and pays for usage) | Provider CLI OAuth, orchestrated headless by the control plane |
+Creating an agent **from a template** copies the shared `templates/` files into the tenant
+prefix first (§3); from then on hydration reads only the tenant's own org/group objects.
 
-"Service account" / "billing login" = **B**. We replicate Houston's flow B.
+---
 
-**How the connection works (headless relay).** The runtime authenticates by running the
-provider's own CLI and letting the provider's OAuth take over. Our instances run in a cloud
-sandbox with **no browser**, so we always use the **headless** path Houston built for its
-remote/VPS engines:
+## 5. Local dev / running the MVP
 
-1. Control plane launches the provider CLI as a subprocess with stdin/stdout piped.
-2. It reads stdout line-by-line, **strips ANSI**, and extracts the first **HTTPS login URL**
-   → emits it to the client over WebSocket.
-3. The user authorizes in their own browser and either:
-   - **pastes back** the resulting code (Claude) → control plane writes `code\n` to stdin, or
-   - uses a **device-code** the CLI prints (Codex `--device-auth`); the CLI polls on its own.
-4. On success the CLI writes its credentials file; the control plane reports completion over WS.
+What it takes to run the MVP locally:
 
-Exact per-provider commands (from Houston):
+- The **Go orchestrator** process (REST entrypoint for create-agent and run-agent).
+- The **`claude` CLI** installed and authenticated (the local runtime).
+- **Supabase** — local CLI or a cloud project — with the schema, buckets, and **RLS policies**
+  applied, plus the `templates` catalog seeded.
+- **Seed fixture** — the 2-org / 2-group / 3-user data used by the leak test.
+
+There is no cloud/sandbox provisioning in the MVP: "spin up the machine" = open Claude Code in
+a local terminal.
+
+---
+
+# Appendix — Post-MVP / exploration
+
+> The MVP fixes two things deliberately: **runtime = local Claude Code** and **storage = Supabase
+> buckets**. This appendix records the longer-term options and the research behind them. They
+> are **not** part of the MVP.
+
+## A. Runtime options (not yet decided for post-MVP)
+
+How the agent loop runs once we leave the local terminal.
+
+- **Option A — Claude Agent SDK (headless).** Same agentic loop/tools as Claude Code, run
+  non-interactively (`-p` / `query()`). **Cross-host fact:** persist
+  `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` and restore it before `resume` →
+  `~/.claude` becomes a hydrated artifact stored in Supabase. Best for Claude-native behavior
+  with least custom plumbing. Docs: code.claude.com/docs/en/headless,
+  platform.claude.com/docs/en/agent-sdk/{sessions,hosting}.
+- **Option B — Vercel AI SDK (Agent abstraction).** TypeScript, Claude as a provider, strong
+  frontend streaming. Best if web-first; lighter agent layer (we own more of the loop).
+- **Option C — Go-native loop on the Anthropic Messages API.** Single-language stack, max
+  control, but we rebuild tools/skills/memory ourselves.
+
+**Lean:** Option A preserves the stateless-engine model with least plumbing, and the BYOA
+billing model (Appendix C) reinforces it (it requires running the provider CLI / Agent SDK to
+perform the user's own OAuth; a pure API-key loop, Option C, does not).
+
+## B. Hosting / sandbox candidates (post-MVP, founder's set; not AWS)
+
+| Platform | Isolation | Cold start | Price (≈) | GPU | Scale-to-zero | Notes |
+|---|---|---|---|---|---|---|
+| **E2B** | Firecracker microVM, dedicated kernel (strongest) | ~150 ms | $0.0504 / vCPU-hr; Hobby $100 credit, 20 concurrent | No | Yes | Strongest per-tenant boundary; large template catalog |
+| **Daytona** | Container default; optional Kata/Sysbox ≈ microVM | ~27–90 ms (fastest) | $0.0504 / vCPU-hr | No | Yes | Best when per-turn cold-start latency dominates |
+| **Modal** | gVisor | — | ≈ $0.071 / vCPU-hr; 50k+ concurrent | **Yes (in-sandbox)** | Yes | Only option with a GPU *inside* the sandbox |
+| **Railway** | Container PaaS | — | per-service | No | No (per service) | Great DX; weaker per-session isolation |
+| **Google Cloud — Cloud Run** | gVisor containers, scale-to-zero | — | per-request / CPU | Yes | Yes | GCP-native baseline |
+| **Lambda(s)** | — | — | — | depends | — | **Ambiguous:** *AWS Lambda* (excluded) vs *Lambda Labs* (GPU cloud, not a per-session sandbox). Confirm intent. |
+
+**Lean:** E2B for strongest isolation; Daytona if cold-start latency dominates; Modal only if
+GPU work happens sandbox-side; Cloud Run as the GCP-native baseline. Figures are May 2026
+research — re-verify (pricing drifts).
+
+## C. Provider accounts & billing — Bring Your Own Account (BYOA)
+
+Mirrors how [Houston](https://github.com/gethouston/houston) does it today.
+
+**Principle.** No platform-wide AI API keys, no token reselling. Each org/user **connects
+their own provider account** (Anthropic / OpenAI / Google); AI usage is billed by the provider
+**directly to that account**. This resolves the README's *cost isolation* question for AI
+spend: the billing boundary is the provider account itself, per tenant.
+
+**Two distinct "logins":** (A) **Houston user identity** — Supabase Auth + OAuth (PKCE);
+(B) **provider / "service account"** — provider CLI OAuth, orchestrated headless. "Billing
+login" = B.
+
+**Headless relay.** The control plane launches the provider CLI as a subprocess (stdin/stdout
+piped), reads stdout line-by-line, strips ANSI, extracts the first HTTPS login URL → emits over
+WebSocket. The user authorizes and either **pastes back** a code (Claude) or uses a
+**device-code** the CLI prints (Codex `--device-auth`). On success the CLI writes its
+credentials file; completion is reported over WS.
 
 | Provider | Connect command | Flow | Credentials file |
 |---|---|---|---|
 | **Anthropic / Claude** | `claude auth login --claudeai` | paste-back | `~/.claude/.credentials.json` |
-| **OpenAI / Codex** | `codex login --device-auth -c ...` (remote) | device-code | `~/.codex/auth.json` |
-| **Google / Gemini** | JSON-RPC `authenticate` over `--acp` (no login subcommand), or API key | browser / key | `~/.gemini/oauth_creds.json` or `~/.gemini/.env` |
+| **OpenAI / Codex** | `codex login --device-auth -c ...` | device-code | `~/.codex/auth.json` |
+| **Google / Gemini** | JSON-RPC `authenticate` over `--acp`, or API key | browser / key | `~/.gemini/oauth_creds.json` or `~/.gemini/.env` |
 
-**How it fits our ephemeral / hydrated model.** The provider credentials file is just another
-piece of **per-org/user hydrated state** (like `~/.claude` memory in §3):
+**Fit with the hydrated model.** The credentials file is per-org/user hydrated state stored
+encrypted in Supabase, scoped to one tenant, hydrated into the instance at start, synced back
+on refresh. The connect/login relay is a control-plane provisioning step (the Go orchestrator
+plays the role Houston's Rust `engine-core` does). **Isolation:** a compromised instance cannot
+spend another org's provider account.
 
-- Stored **encrypted in Supabase**, scoped to one org/user, reachable only with that tenant's
-  short-lived scoped token (§5).
-- **Hydrated** into the ephemeral instance's home (`~/.claude/.credentials.json`, etc.) at
-  start; **synced back** if the token is refreshed.
-- The **connect/login relay** runs as a control-plane provisioning step — the Go control plane
-  plays the role Houston's Rust `engine-core` does (launch CLI, capture URL, emit WS events,
-  write stdin). "Stateless engine" still holds: credentials live in Supabase, not on the
-  instance.
-- **Status / logout** mirror Houston: `claude auth status` / `codex login status`, falling back
-  to reading the credentials file; logout clears it and flips the tenant back to "Connect".
+## D. Full agent lifecycle — hydrate → run → sync (post-MVP)
 
-**Isolation consequence.** A tenant's provider credentials never enter another tenant's
-instance, because hydration is gated by the same per-instance scoped token (§5). A compromised
-instance cannot spend another org's provider account.
+In v1 an agent **is a folder on local disk** and the filesystem is the source of truth
+(`agents_crud::create()` writes it; `build_agent_context()` re-injects state files at every
+`sessions::start`). Post-MVP we keep the reframe the MVP already uses — **Supabase is the
+source of truth; the instance disk is a throwaway working copy** — and add **sync-back** of
+mutated state so personalization survives teardown.
 
-**Interaction with §3.** BYOA via provider-CLI OAuth requires actually running the provider
-CLI / Agent SDK → it reinforces **Option A**. A pure **Option C** (Go-native loop on our own
-API key) implies a *different* billing model (platform API billing, not the user's
-account/subscription) and would not use this connect flow.
+**Artifact mapping (disk → Supabase):**
 
----
-
-## 7. Agent lifecycle — creation & personalization on Houston 2.0
-
-In Houston today an agent **is a folder on local disk**, and the filesystem is the source of
-truth: `agents_crud::create()` materializes a folder (`.houston/agent.json`, `CLAUDE.md`,
-seeds, skills, skeleton via `seed_agent()`), and personalization accumulates as **state files**
-that `build_agent_context()` re-injects into the prompt at every `sessions::start`.
-
-Houston 2.0 cannot keep the local filesystem as the source of truth — instances are ephemeral
-and multi-tenant. The reframe (which is exactly the README's *"an agent is a configuration, not
-a process"*):
-
-> **Supabase is the source of truth; the instance's disk is a materialized, throwaway working
-> copy.** Creating an agent = persisting its definition to Supabase. Running a session =
-> *hydrating* that definition into the instance, running Houston's existing filesystem logic
-> unchanged, and *syncing back* the mutated state. Personalization lives in Supabase, not on a
-> disk that disappears when the instance tears down.
-
-The payoff: **Houston's in-instance agent logic is reused as-is** (`seed_agent`,
-`build_agent_context`, the learnings/skills assembly). We only add a hydrate-before /
-sync-after wrapper at the control-plane boundary (§2).
-
-### 7.1 Artifact mapping (disk → Supabase)
-
-| Houston artifact | Nature | Houston 2.0 home |
+| v1 artifact | Nature | Houston 2.0 home |
 |---|---|---|
-| `.houston/agent.json` (id, config_id, color, ts) | definition | `agents` row + `org_id`, `group_id` |
+| `.houston/agent.json` (id, config, color, ts) | definition | `agents` row + `org_id`, `group_id` |
 | `CLAUDE.md` — instructions | definition | agent definition (Postgres column or Storage object) |
-| `CLAUDE.md` — `## Learnings` section | mutable state | synced back each session |
-| `.agents/skills/` | versioned definition | Supabase Storage, per-org prefix (or a `skills` table) |
+| `CLAUDE.md` — `## Learnings` | mutable state | synced back each session |
+| `.agents/skills/` | versioned definition | Storage, per-org prefix (or `skills` table) |
 | seeds: `outputs.json`, `routines.json`, … | initial state | written at creation, then mutable |
 | `learnings.json`, `integrations.json` | mutable state | per-agent state, hydrated/synced |
-| `config/context-ledger.json` ("what the agent knows about you") | mutable knowledge | candidate for the org/group knowledge layer + pgvector (§5) |
+| `config/context-ledger.json` | mutable knowledge | candidate for the org/group knowledge layer + pgvector |
 | `activity.json`, `routine_runs` | append-only log | per-agent state table |
-| `agent-schemas` JSON Schemas | static contract | embedded at build — **not** per-tenant |
-| `AGENTS.md` / `GEMINI.md` symlinks | derived | recreated in-instance by `seed_agent()` — not stored |
+| `agent-schemas` JSON Schemas | static contract | embedded at build — not per-tenant |
+| `AGENTS.md` / `GEMINI.md` symlinks | derived | recreated in-instance by `seed_agent()` |
 
-### 7.2 Creation — the four paths still converge
+**Reuse:** Houston's in-instance logic (`seed_agent`, `build_agent_context`, the learnings/
+skills assembly) is reused **as-is**; we only add a hydrate-before / sync-after wrapper. The
+learnings **anti-injection** sanitization (`learnings_context.rs`: drop "ignore previous
+instructions"-style entries, strip control chars, cap ~4 000 chars) runs in-instance — keep it.
 
-In Houston, blank / "create with AI" / store / GitHub all converge on `create()`. In Houston
-2.0 they converge on **"persist the agent definition to Supabase"** (scoped to org + group):
+## E. Open decisions / next steps
 
-- **AI-assist** (`generate_instructions.rs`, cheap model, 60 s one-shot) runs in the control
-  plane or a short-lived instance **using the tenant's BYOA credentials (§6)** — so even
-  agent-authoring generation is billed to the user's own account.
-- **Store / GitHub install** fetches `houston.json` + `CLAUDE.md` + `icon.png` + skills,
-  validates `id`, and stores those as Supabase objects scoped to the org (replacing Houston's
-  "installed directory on disk").
-- The result of every path is a definition record, never a long-lived process.
-
-### 7.3 Session & personalization — hydrate → run → sync back
-
-1. Control plane resolves tenant context (org + group) and mints the scoped token (§5).
-2. Provisions an instance and **hydrates** the agent folder from Supabase **and** the BYOA
-   provider credentials (§6) into the instance home.
-3. **In-instance, unchanged Houston logic:** `seed_agent()` (idempotent) →
-   `build_agent_context()` assembles the prompt (Working Directory, mode file, learnings,
-   skills index, workspace context, used integrations).
-4. Runs the session via the chosen runtime (§3).
-5. **Syncs back** the mutated state (`learnings.json`, `integrations.json`,
-   `context-ledger.json`, `CLAUDE.md ## Learnings`, routines/activity) to Supabase.
-6. Tears down (scale to zero).
-
-The learnings **anti-injection** sanitization (`learnings_context.rs`: drop "ignore previous
-instructions"-style entries, strip control chars, cap ~4 000 chars, mark as background data)
-runs in-instance and composes with our tenant isolation — keep it as-is.
-
-### 7.4 What changes vs Houston
-
-- **Source of truth:** local disk → Supabase; the instance disk is an ephemeral cache.
-- **Multi-tenancy:** every agent carries `org_id` + `group_id`; RLS (§5) enforces isolation.
-- **Workspace:** in Houston just a folder grouping agents; here it becomes a tenant-scoped
-  grouping — a natural candidate to map onto the README's **group**, with "workspace context"
-  → group knowledge and `context-ledger` → general/group knowledge in pgvector (§5).
-
-New decisions this raises are folded into §8.
-
----
-
-## 8. Open decisions / next steps
-
-- **Runtime pick** (§3): A / B / C.
-- **Hosting pick** (§4): E2B / Daytona / Modal / Cloud Run / Railway — and resolve the
+- **Runtime pick** (Appendix A): A / B / C — for post-MVP, once we leave the local terminal.
+- **Hosting pick** (Appendix B): E2B / Daytona / Modal / Cloud Run / Railway — resolve the
   "Lambda(s)" ambiguity.
-- **Cost isolation** (README open question): **AI spend is now resolved by BYOA** (§6 — billed
-  to each tenant's own provider account). What remains open is *compute* cost isolation: is
-  shared ephemeral compute enough, or do some tenants need dedicated resources?
-- **Groups** (README open question): a controlled list per org, or free-form labels?
-- **Agent storage shape** (§7): mirror the agent folder as opaque Storage objects (fast port,
-  least logic) vs. normalize into Postgres tables (queryable, RLS-granular, more mapping work).
-  Likely hybrid: definition + state in Postgres, large/opaque blobs (skills, icons) in Storage.
-- **Sync timing** (§7): persist state at end-of-session vs. write-through on every change
-  (durability vs. chattiness).
-- **Session concurrency** (§7): Houston assumes a single writer per agent folder; multi-tenant
-  may run concurrent sessions of one agent → need a strategy (single active-session lock,
-  last-writer-wins, or session forking).
-- **Next branch after this doc:** Milestone 1 scaffold — Go control-plane skeleton + Supabase
-  schema + RLS policies + the leak test. Explicitly **out of scope** for this `develop` cut
-  (design doc only).
+- **Cost isolation:** AI spend resolved by BYOA (Appendix C). Open: *compute* cost isolation
+  (shared ephemeral vs dedicated per tenant).
+- **Groups:** controlled list per org, or free-form labels?
+- **Agent storage shape:** MVP uses **Storage objects** (buckets). Post-MVP, consider
+  normalizing definition + state into Postgres (queryable, RLS-granular) — likely hybrid.
+- **Sync timing** (post-MVP): end-of-session vs write-through.
+- **Session concurrency:** v1 assumes one writer per agent folder; multi-tenant may run
+  concurrent sessions → lock / last-writer-wins / session fork.
+- **Retrieval:** MVP sends all context; post-MVP add pgvector semantic search scoped to
+  `{ general, group }`.
 
----
+## F. Resources
 
-## 9. Resources
+**Reference implementation (Houston today)** — https://github.com/gethouston/houston
+(provider relay `engine/houston-engine-core/src/provider/login_relay.rs`; adapters
+`engine/houston-terminal-manager/src/provider/{anthropic,openai,gemini}.rs`; REST
+`engine/houston-engine-server/src/routes/providers.rs`; agent creation
+`engine/houston-engine-core/src/agents_crud.rs`).
 
-**Reference implementation (how Houston does it today)**
-- Houston (gethouston) — https://github.com/gethouston/houston
-  — provider connect/relay: `engine/houston-engine-core/src/provider/login_relay.rs`,
-  adapters `engine/houston-terminal-manager/src/provider/{anthropic,openai,gemini}.rs`,
-  REST `engine/houston-engine-server/src/routes/providers.rs`, frontend
-  `app/src/components/shell/provider-login-dialog.tsx`.
+**Runtime** — code.claude.com/docs/en/headless ·
+platform.claude.com/docs/en/agent-sdk/sessions · platform.claude.com/docs/en/agent-sdk/hosting ·
+ai-sdk.dev · vercel.com/docs/agent-resources/coding-agents/claude-code ·
+platform.claude.com/docs/en/api/overview
 
-**Runtime**
-- Claude Code headless mode — https://code.claude.com/docs/en/headless
-- Claude Agent SDK — sessions — https://platform.claude.com/docs/en/agent-sdk/sessions
-- Claude Agent SDK — hosting — https://platform.claude.com/docs/en/agent-sdk/hosting
-- Vercel AI SDK — https://ai-sdk.dev
-- Vercel × Claude Code/Agent SDK — https://vercel.com/docs/agent-resources/coding-agents/claude-code
-- Anthropic Messages API — https://platform.claude.com/docs/en/api/overview
+**Hosting** — startuphub.ai/.../daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026 ·
+superagent.sh/blog/ai-code-sandbox-benchmark-2026 ·
+northflank.com/blog/daytona-vs-e2b-ai-code-execution-sandboxes ·
+northflank.com/blog/ai-sandbox-pricing · northflank.com/blog/best-agent-cloud-platforms
 
-**Hosting / sandbox**
-- Daytona vs E2B vs Modal vs Vercel Sandbox (2026) — https://www.startuphub.ai/ai-news/artificial-intelligence/2026/daytona-vs-e2b-vs-modal-vs-vercel-sandbox-2026
-- AI code sandbox benchmark 2026 — https://www.superagent.sh/blog/ai-code-sandbox-benchmark-2026
-- Daytona vs E2B — https://northflank.com/blog/daytona-vs-e2b-ai-code-execution-sandboxes
-- AI sandbox pricing comparison — https://northflank.com/blog/ai-sandbox-pricing
-- Best agent cloud platforms 2026 — https://northflank.com/blog/best-agent-cloud-platforms
+**Supabase** — supabase.com/docs/guides/database/postgres/row-level-security ·
+supabase.com/docs/guides/ai (pgvector) ·
+supabase.com/docs/guides/storage/security/access-control
 
-**Supabase**
-- Row Level Security — https://supabase.com/docs/guides/database/postgres/row-level-security
-- pgvector / AI & vectors — https://supabase.com/docs/guides/ai
-- Storage access control — https://supabase.com/docs/guides/storage/security/access-control
-
-> All hosting/runtime figures above are from May 2026 web research and should be re-verified
-> before any final platform commitment — pricing in particular drifts.
+> Hosting/runtime figures are May 2026 web research — re-verify before any platform commitment.
