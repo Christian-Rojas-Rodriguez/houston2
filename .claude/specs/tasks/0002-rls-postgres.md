@@ -68,16 +68,15 @@ Razón: `organizations` no tiene `org_id` propio (es la raíz del tenant). La co
 
 **2. Política de `groups`** — `org:owner` ve todos los grupos de su org; otros roles solo ven su grupo y el general:
 
+> ⚠️ **Recursion-proof**: la policy de `groups` NO puede contener un subquery sobre `groups` (`SELECT g.id FROM groups g ...`) porque evaluar la policy volvería a disparar la misma policy → `infinite recursion detected in policy for relation "groups"`. El invariante `id ∈ {my_group, general groups}` se expresa con las columnas de la **propia fila** (`id`, `is_general`), que rompe el ciclo. Verificado contra Postgres local con pgTAP (24/24).
+
 ```sql
 CREATE POLICY tenant_isolation ON groups FOR ALL USING (
   org_id = (SELECT org_id FROM current_tenant())
   AND (
     (SELECT role FROM current_tenant()) = 'org:owner'
-    OR id IN (
-      SELECT g.id FROM groups g
-      WHERE g.org_id = (SELECT org_id FROM current_tenant())
-        AND (g.id = (SELECT group_id FROM current_tenant()) OR g.is_general = true)
-    )
+    OR id = (SELECT group_id FROM current_tenant())
+    OR is_general = true
   )
 );
 ```
