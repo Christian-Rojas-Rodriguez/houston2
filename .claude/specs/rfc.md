@@ -298,7 +298,7 @@ Reuso de Houston: el patrón PKCE + Google SSO es idéntico; solo cambian creden
 | id | slug | scope | depende de | estado |
 |---|---|---|---|---|
 | 0001 | db-schema | Migraciones: `organizations`, `groups`, `memberships`, `agents`, `runs`, `org_credentials` | — | ✅ done |
-| 0002 | rls-postgres | Políticas RLS + helper `current_tenant()` + `get_org_anthropic_key()` en todas las tablas tenant-scoped | 0001 | 🔲 skeleton |
+| 0002 | rls-postgres | Políticas RLS + helper `current_tenant()` + `get_org_anthropic_key()` en todas las tablas tenant-scoped | 0001 | ✅ done |
 | 0003 | storage-layout | Bucket structure + Storage RLS + seed template `sales` en `templates/` | 0001 | 🔲 skeleton |
 | 0004 | auth-identity | Supabase project propio + Google SSO PKCE + loopback redirect en Go | 0001 | ✅ implemented |
 | 0005 | rbac-middleware | Go middleware: deriva `(org_id, group_id, role)` + enforcement 403 por rol | 0002, 0004 | ✅ implemented |
