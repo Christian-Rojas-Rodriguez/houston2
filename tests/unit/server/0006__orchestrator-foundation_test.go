@@ -235,18 +235,21 @@ func TestPostAgents_ValidJWT_NoMembership_Returns403Forbidden(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// AC4 — POST /v1/agents valid JWT + RoleMember querier + RequireRole(Member) → 200 stub
+// AC4 (updated by Task 0007) — POST /v1/agents now requires RoleManager.
+// A RoleMember caller must receive 403 forbidden.
+// The prior AC4 tested the stub response; Task 0007 replaced the stub with the
+// real handler (RequireRole raised to RoleManager), so RoleMember is rejected.
 // ---------------------------------------------------------------------------
 
-// TestPostAgents_ValidJWT_RoleMember_RequireMember_Returns200Stub verifies AC4.
-func TestPostAgents_ValidJWT_RoleMember_RequireMember_Returns200Stub(t *testing.T) {
+// TestPostAgents_ValidJWT_RoleMember_Returns403_AgentRouteRequiresManager verifies
+// that after Task 0007 wires the real handler, POST /v1/agents rejects RoleMember.
+func TestPostAgents_ValidJWT_RoleMember_Returns403_AgentRouteRequiresManager(t *testing.T) {
 	cfg := testServerConfig("https://fake.supabase.co")
-	// Stub querier grants RoleMember, which satisfies RequireRole(RoleMember).
 	q := &stubQuerier{
 		returnCtx: middleware.TenantContext{
 			OrgID:   uuid.New(),
 			GroupID: uuid.New(),
-			Role:    middleware.RoleMember,
+			Role:    middleware.RoleMember, // insufficient for POST /v1/agents
 		},
 	}
 	srv := server.New(cfg, q)
@@ -260,20 +263,10 @@ func TestPostAgents_ValidJWT_RoleMember_RequireMember_Returns200Stub(t *testing.
 	res := rec.Result()
 	defer res.Body.Close()
 
-	if res.StatusCode != http.StatusOK {
+	if res.StatusCode != http.StatusForbidden {
 		body, _ := io.ReadAll(res.Body)
-		t.Fatalf("AC4: expected 200, got %d — body: %s", res.StatusCode, body)
-	}
-
-	var body map[string]any
-	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
-		t.Fatalf("AC4: body is not valid JSON: %v", err)
-	}
-	if body["status"] != "ok" {
-		t.Errorf("AC4: body[\"status\"] = %v, want \"ok\"", body["status"])
-	}
-	if body["stub"] != true {
-		t.Errorf("AC4: body[\"stub\"] = %v, want true", body["stub"])
+		t.Errorf("AC4(0007): expected 403 for RoleMember on POST /v1/agents, got %d — body: %s",
+			res.StatusCode, body)
 	}
 }
 

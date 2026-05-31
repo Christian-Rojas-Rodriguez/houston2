@@ -3,7 +3,7 @@ task: "0007"
 slug: create-agent-flow
 granularity: slice
 version: 0.1.0
-status: draft
+status: implemented
 declares:
   - type: handler
     name: create-agent-flow
