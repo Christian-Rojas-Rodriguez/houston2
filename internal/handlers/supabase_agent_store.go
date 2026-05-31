@@ -70,8 +70,10 @@ func (s *SupabaseAgentStore) CreateAgent(ctx context.Context, jwt string, a Agen
 }
 
 // GetTemplate fetches templates/{templateID}/CLAUDE.md from Supabase Storage.
+// Templates live in the single bucket `houston` under name templates/{id}/CLAUDE.md
+// (Task 0003 templates_readonly policy); there is no separate `templates` bucket.
 func (s *SupabaseAgentStore) GetTemplate(ctx context.Context, jwt string, templateID string) ([]byte, error) {
-	path := fmt.Sprintf("/storage/v1/object/templates/%s/CLAUDE.md", templateID)
+	path := fmt.Sprintf("/storage/v1/object/houston/templates/%s/CLAUDE.md", templateID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.SupabaseURL+path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build template request: %w", err)
