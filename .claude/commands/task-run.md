@@ -19,6 +19,14 @@ Invoke `Agent(architect)` with the following instruction:
 ## Phase A — Spec (no code written yet)
 
 ```
+Step 0.  Ensure clean git state and create task branch:
+         git status  → must be clean. If dirty: STOP, tell user to commit or stash first.
+         git checkout develop
+         git pull origin develop
+         Read .claude/specs/tasks/$ARGUMENTS-*.md — get `branch` field from frontmatter
+         (default: feat/$ARGUMENTS-<slug> if field missing).
+         git checkout -b <branch>
+
 Step 1.  Invoke Agent(researcher):
          "Survey the codebase and relevant libraries for task $ARGUMENTS.
           Read workflow.md, prd.md, rfc.md, and the existing task spec if it exists.

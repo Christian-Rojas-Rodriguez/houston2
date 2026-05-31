@@ -1,35 +1,59 @@
 ---
-description: Draft an RFC (Request for Comments / Technical Design Doc) from an approved PRD. Conducts a technical interview, decides granularity, decomposes into Tasks, and declares POA components (agents/skills/hooks/commands/MCPs). Use during Bootstrap (UC-1) after the PRD gate passes. Output feeds plan-workflow to derive workflow.md.
+description: Draft an RFC (Request for Comments / Technical Design Doc) from an approved PRD. Conducts a targeted technical interview, decides granularity, decomposes into Tasks, and declares POA components. Use during Bootstrap (UC-1) after the PRD gate passes. Output feeds plan-workflow to derive workflow.md.
 disable-model-invocation: true
 allowed-tools: Read
 ---
 
 # draft-rfc
 
-Conduct a technical interview from an approved PRD and render a filled RFC — including granularity strategy, Task decomposition, and POA declaration (§7 and §8 are load-bearing for `plan-workflow`).
+Guide for identifying what to ask and how to compose the RFC. Planner reads this to decide which technical questions to generate.
 
-## Inputs
+---
 
-- Approved PRD (`.claude/specs/prd.md`).
-- Researcher findings (domain + stack).
-- Template: `.claude/specs/templates/rfc.md`.
+## Phase 1 — Gap analysis (what to ask)
 
-## Interview guide
+Read the approved PRD + researcher output. For each RFC section, decide: **infer or ask?**
 
-| Section | Key question to resolve |
-|---|---|
-| §2 Contexto | ¿Cuál es el estado actual del sistema que esto cambia? |
-| §3 Goals | ¿Qué goals del PRD sirve directamente esta arquitectura? |
-| §4 Diseño | ¿Cuál es el patrón arquitectural central (capas, flujo de datos)? |
-| §5 Alternativas | ¿Qué opciones se descartaron y por qué? |
-| §6 Impacto | ¿Hay concerns de seguridad, migración u observabilidad? |
-| §7 Granularidad | ¿Cuál es la unidad atómica de trabajo? (1 Task = ¿1 qué?) |
-| §8 Declaración POA | ¿Qué primitivas POA se necesitan: agents, skills, hooks, commands, MCPs? |
-| §9 Testing | ¿Cuáles son los boundaries de unit / integration / acceptance? |
+| RFC section | Infer when... | Ask when... |
+|---|---|---|
+| §2 Context | Current state described in PRD §3 | Existing system is complex and unstated |
+| §3 Goals / Non-goals | Directly derivable from PRD §5 + §6 | PRD goals could map to multiple incompatible architectures |
+| §4 Proposed design | Stack is known and there's one obvious pattern | Multiple viable architectures exist; trade-offs matter |
+| §5 Alternatives | One dominant approach in the space | Explicit trade-off decisions should be documented |
+| §6 Cross-cutting impact | Standard stack with no unusual security/perf constraints | Encryption, multi-tenancy, compliance, or migration is involved |
+| **§7 Granularity** | **Always ask** unless PRD already names components (e.g. "6 DB tables") | — |
+| **§8 POA Declaration** | **Always ask** to confirm agent/skill/hook set | — |
+| §9 Testing | Standard unit/integration/acceptance | Project has unusual test requirements (SQL, infra, e2e flows) |
 
-## Output
+**§7 and §8 are mandatory** — always surface at least one question for each. They are load-bearing: `plan-workflow` cannot derive `workflow.md` without them being complete.
 
-A filled `.claude/specs/templates/rfc.md`-shaped Markdown document. **§7 and §8 are mandatory and must be complete** — they are consumed by `plan-workflow` to derive `workflow.md`.
+---
+
+## Phase 2 — Question quality bar
+
+Same rules as draft-prd. Additionally for RFC:
+
+- **§7 question format**: "What is the atomic unit of work for a Task? (1 Task = 1 what?) Example options: 1 DB migration, 1 API endpoint, 1 agent definition. Propose your preferred granularity and list the resulting Tasks with a one-line scope each."
+- **§8 question format**: "Which agents, skills, hooks, and commands does this project need? Review the standard set from `propose-agents` and tell me which apply, which to remove, and which new ones to add."
+- For §4 (design): provide your best proposal from researcher context and ask for confirmation rather than asking an open-ended question. Example: "Based on your stack, I'd propose [X architecture]. Does this match your intent, or is there a different pattern you have in mind?"
+
+**Max 7 questions.** §7 and §8 count as mandatory slots. Fill the rest with the most impactful technical unknowns.
+
+---
+
+## Phase 3 — Composition rules
+
+After receiving answers:
+
+- §7 must name the granularity strategy + a complete task table (id, slug, one-line scope)
+- §8 must have complete tables for agents, skills, hooks, commands (MCPs optional)
+- Use `propose-agents` defaults for agent config (model, effort, maxTurns, permissionMode)
+- Cite PRD sections when an RFC decision traces to a product requirement (`PRD §5`)
+- The file is the review surface — write so a reader can understand the full architecture without the Q&A transcript
+
+---
+
+## RFC output format
 
 ```markdown
 ---
@@ -39,17 +63,18 @@ prd: .claude/specs/prd.md
 ---
 
 # RFC: <title>
-...
+
+## §1. Resumen
+## §2. Contexto y motivación
+## §3. Goals / Non-goals
+## §4. Diseño propuesto
+## §5. Alternativas consideradas
+## §6. Impacto transversal
+## §7. Granularidad y descomposición en Tasks   ← load-bearing
+## §8. Declaración POA                          ← load-bearing
+## §9. Plan de testing
+## §10. Riesgos y mitigaciones
 ## §11. Preguntas abiertas
-- [ ] <anything unresolved>
 ```
 
-## Operating rules
-
-- The RFC captures **How** — architecture, trade-offs, granularity, and POA component declarations. Not What/Why (those live in the PRD).
-- §7 (Granularidad) and §8 (Declaración POA) are load-bearing: `plan-workflow` reads these to derive `workflow.md`. Do not leave them as `TBD`.
-- Invoke `propose-agents` when populating §8 to ensure correct model/effort/maxTurns/permissionMode defaults per agent.
-- One Task = one Spec. If a scope item cannot be described in one sentence, decompose it further.
-- Cite PRD sections (`PRD §X`) when an RFC decision traces to a product requirement.
-- **Output goes to specter**, which writes it to `.claude/specs/drafts/rfc.md` with `status: draft` for the user to open, review, and iterate on. The file is the review surface — not the console output.
-- This skill is `disable-model-invocation: true` because the draft must be written to disk and reviewed by the User before `plan-workflow` derives the Workflow.
+**§7 and §8 must be complete before Specter writes the RFC draft.** If they have `TBD`, ask a follow-up before outputting.

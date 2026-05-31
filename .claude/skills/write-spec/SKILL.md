@@ -25,6 +25,8 @@ slug: <slug>
 granularity: <component|task|feature|...>
 version: 0.1.0
 status: in-progress
+branch: feat/<id>-<slug>
+base: develop
 declares:
   - type: <agent|skill|hook|command|other>
     name: <name>

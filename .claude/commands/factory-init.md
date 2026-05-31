@@ -10,6 +10,14 @@ Bootstrap this project end-to-end using the two-gate UC-1 flow. Project descript
 
 ## What to do
 
+Before invoking architect, ensure a clean git state on develop:
+```
+git status  → must be clean. If dirty: STOP, tell user to commit or stash first.
+git checkout develop
+git pull origin develop
+```
+All PRD/RFC/workflow bootstrap commits go directly to `develop`.
+
 Invoke `Agent(architect)` with the following instruction:
 
 > "Run UC-1 factory bootstrap for this project. Project description: $ARGUMENTS

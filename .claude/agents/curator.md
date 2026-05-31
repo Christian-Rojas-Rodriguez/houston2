@@ -74,13 +74,13 @@ Explicit non-goals derived from RFC §3 (non-goals) and adjacent task boundaries
 **4. Handle existing skeletons**
 
 If the task spec already exists with skeleton placeholders (`_Skeleton — ..._` or `_Por escribir_`):
-- Keep the frontmatter intact (id, slug, granularity, version, status, declares, scope)
+- Keep the frontmatter intact (id, slug, granularity, version, status, branch, base, declares, scope)
 - Replace only the skeleton sections with your produced content
 - Do not delete or move any section that already has real content
 
 **5. Output**
 
-Return the complete spec content (all sections filled, no truncation). This output goes to Specter to write/update the file.
+Return the complete spec content (all sections filled, no truncation). Ensure the frontmatter includes `branch: feat/<id>-<slug>` and `base: develop` (preserve existing values if already set). This output goes to Specter to write/update the file.
 
 Append at the end:
 ```
