@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nomenclator/houston2/internal/auth"
+	"github.com/nomenclator/houston2/internal/handlers"
 	"github.com/nomenclator/houston2/internal/middleware"
 )
 
@@ -118,8 +119,7 @@ func (s *Server) buildHandler(cfg Config, q middleware.TenantQuerier, logger *sl
 	mux.Handle("GET /auth/login", auth.LoginHandler(authCfg))
 	mux.Handle("GET /auth/callback", auth.CallbackHandler(authCfg))
 
-	// Protected v1 routes: Auth → Tenant → RequireRole(Member) → stub.
-	// Individual routes requiring higher roles chain RequireRole again (Tasks 0007–0009).
+	// Base protected chain for routes that require only RoleMember.
 	protected := auth.AuthMiddleware(authCfg)(
 		middleware.TenantMiddleware(q)(
 			middleware.RequireRole(middleware.RoleMember)(
@@ -128,7 +128,17 @@ func (s *Server) buildHandler(cfg Config, q middleware.TenantQuerier, logger *sl
 		),
 	)
 
-	mux.Handle("POST /v1/agents", protected)
+	// POST /v1/agents requires RoleManager and uses the real handler (Task 0007).
+	agentStore := handlers.NewSupabaseAgentStore(cfg.SupabaseURL, cfg.AnonKey)
+	agentProtected := auth.AuthMiddleware(authCfg)(
+		middleware.TenantMiddleware(q)(
+			middleware.RequireRole(middleware.RoleManager)(
+				handlers.CreateAgent(agentStore, ""),
+			),
+		),
+	)
+
+	mux.Handle("POST /v1/agents", agentProtected)
 	mux.Handle("GET /v1/agents/{id}", protected)
 	mux.Handle("POST /v1/runs", protected)
 	mux.Handle("GET /v1/runs/{id}", protected)
