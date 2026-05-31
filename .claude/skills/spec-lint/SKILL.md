@@ -4,8 +4,6 @@ disable-model-invocation: true
 allowed-tools: Read
 ---
 
-> Skeleton — full behavior is implemented in Task 0016.
-
 # spec-lint
 
 Heuristic check that a Spec is testable and unambiguous.

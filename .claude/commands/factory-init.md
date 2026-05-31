@@ -10,7 +10,7 @@ Bootstrap this project end-to-end using the two-gate UC-1 flow. Project descript
 
 ## What to do
 
-Invoke `Agent(tl)` with the following instruction:
+Invoke `Agent(architect)` with the following instruction:
 
 > "Run UC-1 factory bootstrap for this project. Project description: $ARGUMENTS
 > Follow the UC-1 two-gate sequence from your instructions exactly:

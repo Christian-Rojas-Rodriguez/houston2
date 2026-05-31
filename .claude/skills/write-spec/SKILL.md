@@ -4,8 +4,6 @@ disable-model-invocation: true
 allowed-tools: Read, Write
 ---
 
-> Skeleton — full behavior is implemented in Task 0014.
-
 # write-spec
 
 Render and write a Spec file in the canonical format expected by `pre-spec-validate`.
