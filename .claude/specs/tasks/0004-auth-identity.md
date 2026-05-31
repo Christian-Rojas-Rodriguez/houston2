@@ -3,7 +3,7 @@ task: "0004"
 slug: auth-identity
 granularity: slice
 version: 0.1.0
-status: skeleton
+status: implemented
 declares:
   - type: handler
     name: auth-identity

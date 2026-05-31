@@ -3,7 +3,7 @@ task: "0005"
 slug: rbac-middleware
 granularity: slice
 version: 0.1.0
-status: draft
+status: implemented
 declares:
   - type: middleware
     name: rbac-middleware

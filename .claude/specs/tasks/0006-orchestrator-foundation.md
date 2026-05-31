@@ -3,7 +3,7 @@ task: "0006"
 slug: orchestrator-foundation
 granularity: slice
 version: 0.1.0
-status: draft
+status: implemented
 declares:
   - type: server
     name: orchestrator-foundation
