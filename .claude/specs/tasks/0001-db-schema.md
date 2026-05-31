@@ -2,8 +2,8 @@
 task: "0001"
 slug: db-schema
 granularity: slice
-version: 0.1.0
-status: draft
+version: 0.1.1
+status: done
 declares:
   - type: migration
     name: db-schema
