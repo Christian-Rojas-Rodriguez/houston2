@@ -2,8 +2,8 @@
 task: "0002"
 slug: rls-postgres
 granularity: slice
-version: 0.1.0
-status: skeleton
+version: 0.1.1
+status: done
 declares:
   - type: policy
     name: rls-postgres
