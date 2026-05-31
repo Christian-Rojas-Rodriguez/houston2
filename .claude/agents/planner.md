@@ -6,7 +6,7 @@ effort: high
 maxTurns: 40
 permissionMode: plan
 memory: project
-color: orange
+color: red
 tools: Read, Agent(researcher), Skill(draft-prd), Skill(draft-rfc), Skill(plan-workflow), Skill(propose-agents), Skill(research-topic)
 ---
 
