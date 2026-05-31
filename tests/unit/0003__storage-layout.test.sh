@@ -10,15 +10,15 @@
 # Acceptance criteria covered:
 #   AC-1  bucket houston exists, public=false
 #   AC-2  policies houston_tenant_isolation + templates_readonly exist
-#   AC-3  group:member of org1 sees 0 objects under houston/<org2>/
-#   AC-4  group:member of org1/group1 sees own group + general, NOT group2
+#   AC-3  group:member of org1 sees 0 objects under <org2>/ (bucket-relative name)
+#   AC-4  group:member of org1/group1 sees own group + general (by UUID), NOT group2
 #   AC-5  org:owner of org1 sees group1 AND group2, 0 from org2
 #   AC-6  templates/sales/CLAUDE.md visible to any authenticated
 #   AC-7  INSERT under templates/ from authenticated is rejected
-#   AC-8  INSERT with path houston/<org2>/... from org1 session is rejected
+#   AC-8  INSERT with name <org2>/... from org1 session is rejected
 #   AC-9  seed uploads template (verified via psql after seed)
 #   AC-10 seed is idempotent (runs twice, exit 0 both)
-#   AC-11 malformed short path houston/<org1> is NOT visible to authenticated
+#   AC-11 malformed short path <org1> (no group segment) is NOT visible to authenticated
 #   AC-12 current_tenant() exists in pg_proc (precondition)
 # =============================================================================
 
@@ -170,6 +170,7 @@ DECLARE
   _org2   uuid := '00000003-0002-0000-0000-000000000000';
   _g1     uuid := '00000003-0011-0000-0000-000000000000';
   _g2     uuid := '00000003-0012-0000-0000-000000000000';
+  _g_gen1 uuid := '00000003-0013-0000-0000-000000000000';
   _gb     uuid := '00000003-0021-0000-0000-000000000000';
 BEGIN
   -- org1/group1 agent
@@ -177,7 +178,7 @@ BEGIN
   VALUES (
     '00000003-f001-0000-0000-000000000000',
     'houston',
-    'houston/' || _org1::text || '/' || _g1::text || '/agents/a1/CLAUDE.md',
+    _org1::text || '/' || _g1::text || '/agents/a1/CLAUDE.md',
     null, now(), now(), now(), '{}'::jsonb
   ) ON CONFLICT (id) DO NOTHING;
 
@@ -186,7 +187,7 @@ BEGIN
   VALUES (
     '00000003-f002-0000-0000-000000000000',
     'houston',
-    'houston/' || _org1::text || '/' || _g2::text || '/agents/a2/CLAUDE.md',
+    _org1::text || '/' || _g2::text || '/agents/a2/CLAUDE.md',
     null, now(), now(), now(), '{}'::jsonb
   ) ON CONFLICT (id) DO NOTHING;
 
@@ -195,7 +196,7 @@ BEGIN
   VALUES (
     '00000003-f003-0000-0000-000000000000',
     'houston',
-    'houston/' || _org1::text || '/general/notes.md',
+    _org1::text || '/' || _g_gen1::text || '/agents/gen/notes.md',
     null, now(), now(), now(), '{}'::jsonb
   ) ON CONFLICT (id) DO NOTHING;
 
@@ -204,7 +205,7 @@ BEGIN
   VALUES (
     '00000003-f004-0000-0000-000000000000',
     'houston',
-    'houston/' || _org2::text || '/' || _gb::text || '/agents/a3/CLAUDE.md',
+    _org2::text || '/' || _gb::text || '/agents/a3/CLAUDE.md',
     null, now(), now(), now(), '{}'::jsonb
   ) ON CONFLICT (id) DO NOTHING;
 
@@ -222,7 +223,7 @@ BEGIN
   VALUES (
     '00000003-f006-0000-0000-000000000000',
     'houston',
-    'houston/' || _org1::text,
+    _org1::text,
     null, now(), now(), now(), '{}'::jsonb
   ) ON CONFLICT (id) DO NOTHING;
 END;
@@ -257,7 +258,7 @@ SELECT ok(
 );
 
 -- ===========================================================================
--- AC-3: group:member of org1 sees 0 objects under houston/<org2>/
+-- AC-3: group:member of org1 sees 0 objects under <org2>/ (bucket-relative)
 -- ===========================================================================
 DO $$
 DECLARE
@@ -277,9 +278,9 @@ SELECT is(
   (SELECT count(*)::int
    FROM storage.objects
    WHERE bucket_id = 'houston'
-     AND name LIKE 'houston/' || '00000003-0002-0000-0000-000000000000' || '/%'),
+     AND name LIKE '00000003-0002-0000-0000-000000000000' || '/%'),
   0,
-  'AC-3: org1/group1 member sees 0 objects under houston/org2/'
+  'AC-3: org1/group1 member sees 0 objects under <org2>/'
 );
 
 RESET ROLE;
@@ -305,7 +306,7 @@ SELECT ok(
   (SELECT count(*) > 0
    FROM storage.objects
    WHERE bucket_id = 'houston'
-     AND name LIKE 'houston/00000003-0001-0000-0000-000000000000/00000003-0011-0000-0000-000000000000/%'),
+     AND name LIKE '00000003-0001-0000-0000-000000000000/00000003-0011-0000-0000-000000000000/%'),
   'AC-4a: group:member sees objects in own group (group1)'
 );
 
@@ -314,7 +315,7 @@ SELECT ok(
   (SELECT count(*) > 0
    FROM storage.objects
    WHERE bucket_id = 'houston'
-     AND name LIKE 'houston/00000003-0001-0000-0000-000000000000/general/%'),
+     AND name LIKE '00000003-0001-0000-0000-000000000000/00000003-0013-0000-0000-000000000000/%'),
   'AC-4b: group:member sees objects in org1/general'
 );
 
@@ -323,7 +324,7 @@ SELECT is(
   (SELECT count(*)::int
    FROM storage.objects
    WHERE bucket_id = 'houston'
-     AND name LIKE 'houston/00000003-0001-0000-0000-000000000000/00000003-0012-0000-0000-000000000000/%'),
+     AND name LIKE '00000003-0001-0000-0000-000000000000/00000003-0012-0000-0000-000000000000/%'),
   0,
   'AC-4c: group:member sees 0 objects in org1/group2 (foreign group)'
 );
@@ -350,7 +351,7 @@ SELECT ok(
   (SELECT count(*) > 0
    FROM storage.objects
    WHERE bucket_id = 'houston'
-     AND name LIKE 'houston/00000003-0001-0000-0000-000000000000/00000003-0011-0000-0000-000000000000/%'),
+     AND name LIKE '00000003-0001-0000-0000-000000000000/00000003-0011-0000-0000-000000000000/%'),
   'AC-5a: org:owner sees objects in org1/group1'
 );
 
@@ -358,7 +359,7 @@ SELECT ok(
   (SELECT count(*) > 0
    FROM storage.objects
    WHERE bucket_id = 'houston'
-     AND name LIKE 'houston/00000003-0001-0000-0000-000000000000/00000003-0012-0000-0000-000000000000/%'),
+     AND name LIKE '00000003-0001-0000-0000-000000000000/00000003-0012-0000-0000-000000000000/%'),
   'AC-5b: org:owner sees objects in org1/group2'
 );
 
@@ -366,7 +367,7 @@ SELECT is(
   (SELECT count(*)::int
    FROM storage.objects
    WHERE bucket_id = 'houston'
-     AND name LIKE 'houston/00000003-0002-0000-0000-000000000000/%'),
+     AND name LIKE '00000003-0002-0000-0000-000000000000/%'),
   0,
   'AC-5c: org:owner sees 0 objects under org2'
 );
@@ -431,7 +432,7 @@ SELECT throws_ok(
 RESET ROLE;
 
 -- ===========================================================================
--- AC-8: INSERT cross-tenant (houston/<org2>/...) from org1 session is rejected
+-- AC-8: INSERT cross-tenant (<org2>/...) from org1 session is rejected
 -- ===========================================================================
 DO $$
 DECLARE
@@ -451,7 +452,7 @@ SELECT throws_ok(
     VALUES (
       gen_random_uuid(),
       'houston',
-      'houston/00000003-0002-0000-0000-000000000000/00000003-0021-0000-0000-000000000000/agents/hack/CLAUDE.md',
+      '00000003-0002-0000-0000-000000000000/00000003-0021-0000-0000-000000000000/agents/hack/CLAUDE.md',
       null, now(), now(), now(), '{}'::jsonb
     )$$,
   '42501',
@@ -462,7 +463,7 @@ SELECT throws_ok(
 RESET ROLE;
 
 -- ===========================================================================
--- AC-11: malformed short path (houston/<org1>) not visible to authenticated
+-- AC-11: malformed short path (<org1>, no group segment) not visible to authenticated
 -- ===========================================================================
 DO $$
 DECLARE
@@ -481,9 +482,9 @@ SELECT is(
   (SELECT count(*)::int
    FROM storage.objects
    WHERE bucket_id = 'houston'
-     AND name = 'houston/00000003-0001-0000-0000-000000000000'),
+     AND name = '00000003-0001-0000-0000-000000000000'),
   0,
-  'AC-11: malformed short path houston/<org1> is not visible to authenticated'
+  'AC-11: malformed short path <org1> is not visible to authenticated'
 );
 
 RESET ROLE;
