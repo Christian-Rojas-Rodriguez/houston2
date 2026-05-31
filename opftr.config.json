@@ -1,0 +1,8 @@
+{
+  "version": "0.1.5",
+  "phases": {
+    "spec": "anthropic",
+    "code": "anthropic",
+    "review": "anthropic"
+  }
+}
