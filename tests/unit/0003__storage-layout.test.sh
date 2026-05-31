@@ -423,6 +423,8 @@ SELECT throws_ok(
       'templates/evil/inject.md',
       null, now(), now(), now(), '{}'::jsonb
     )$$,
+  '42501',
+  NULL,
   'AC-7: INSERT under templates/ from authenticated is rejected by RLS'
 );
 
@@ -452,6 +454,8 @@ SELECT throws_ok(
       'houston/00000003-0002-0000-0000-000000000000/00000003-0021-0000-0000-000000000000/agents/hack/CLAUDE.md',
       null, now(), now(), now(), '{}'::jsonb
     )$$,
+  '42501',
+  NULL,
   'AC-8: cross-tenant INSERT into org2 path from org1 session is rejected'
 );
 
