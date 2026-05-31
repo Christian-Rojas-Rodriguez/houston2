@@ -8,6 +8,9 @@
 
 BEGIN;
 
+-- Self-contained: install pgtap if the DB doesn't have it yet.
+CREATE EXTENSION IF NOT EXISTS pgtap;
+
 SELECT plan(35);
 
 -- ============================================================
@@ -56,7 +59,7 @@ SELECT has_table('public', 'runs', 'AC-7: runs table exists');
 SELECT has_column('public', 'runs', 'prompt', 'AC-7: runs.prompt exists');
 SELECT col_not_null('public', 'runs', 'prompt', 'AC-7: runs.prompt is NOT NULL');
 SELECT col_default_is(
-  'public', 'runs', 'status', '''pending''::text',
+  'public', 'runs', 'status', 'pending',
   'AC-7: runs.status defaults to pending'
 );
 
