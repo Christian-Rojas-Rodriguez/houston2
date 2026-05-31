@@ -3,7 +3,7 @@ task: "0009"
 slug: provider-credentials
 granularity: slice
 version: 0.1.0
-status: done
+status: skeleton
 declares:
   - type: handler
     name: provider-credentials
