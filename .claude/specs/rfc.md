@@ -1,5 +1,5 @@
 ---
-version: 0.1.0
+version: 0.1.1
 status: approved
 prd: .claude/specs/prd.md
 ---
@@ -120,7 +120,7 @@ CREATE TABLE runs (
 CREATE TABLE org_credentials (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id         uuid NOT NULL REFERENCES organizations(id) UNIQUE,
-  anthropic_key  text NOT NULL,  -- cifrada en reposo
+  anthropic_key  bytea NOT NULL,   -- pgp_sym_encrypt(plaintext, vault_key); bytea para compatibilidad con pgp_sym_decrypt
   created_at     timestamptz DEFAULT now(),
   updated_at     timestamptz DEFAULT now()
 );
@@ -295,20 +295,20 @@ Reuso de Houston: el patrón PKCE + Google SSO es idéntico; solo cambian creden
 
 **Estrategia:** `1 Task = 1 slice vertical entregable` con dependencias explícitas.
 
-| id | slug | scope | depende de |
-|---|---|---|---|
-| 0001 | db-schema | Migraciones: `organizations`, `groups`, `memberships`, `agents`, `runs`, `org_credentials` | — |
-| 0002 | rls-postgres | Políticas RLS + helper `current_tenant()` en todas las tablas tenant-scoped | 0001 |
-| 0003 | storage-layout | Bucket structure + Storage RLS + seed template `sales` en `templates/` | 0001 |
-| 0004 | auth-identity | Supabase project propio + Google SSO PKCE + loopback redirect en Go | 0001 |
-| 0005 | rbac-middleware | Go middleware: deriva `(org_id, group_id, role)` + enforcement 403 por rol | 0002, 0004 |
-| 0006 | orchestrator-foundation | Go HTTP server, rutas `/v1/*`, request context, logging | 0005 |
-| 0007 | create-agent-flow | `POST /v1/agents` (blank, template, ai-assist, github) | 0003, 0006 |
-| 0008 | run-agent-flow | `POST /v1/agents/{id}/runs` + Claude Code subprocess + workspace aislado + concurrencia | 0006, 0007 |
-| 0009 | provider-credentials | CRUD `/v1/orgs/{id}/credentials` — registrar, rotar, validar API key | 0002, 0006 |
-| 0010 | seed-fixture | Script seed: 2 orgs / 2 grupos / 3 usuarios / 3 roles + helpers para tests | 0005 |
-| 0011 | leak-test | Acceptance gate: 0 rows / 0 objetos de otro tenant retornados a Usuario A | 0008, 0010 |
-| 0012 | rbac-test | Acceptance gate: operaciones fuera de rol retornan 403 | 0008, 0010 |
+| id | slug | scope | depende de | estado |
+|---|---|---|---|---|
+| 0001 | db-schema | Migraciones: `organizations`, `groups`, `memberships`, `agents`, `runs`, `org_credentials` | — | ✅ done |
+| 0002 | rls-postgres | Políticas RLS + helper `current_tenant()` + `get_org_anthropic_key()` en todas las tablas tenant-scoped | 0001 | 🔲 skeleton |
+| 0003 | storage-layout | Bucket structure + Storage RLS + seed template `sales` en `templates/` | 0001 | 🔲 skeleton |
+| 0004 | auth-identity | Supabase project propio + Google SSO PKCE + loopback redirect en Go | 0001 | ✅ implemented |
+| 0005 | rbac-middleware | Go middleware: deriva `(org_id, group_id, role)` + enforcement 403 por rol | 0002, 0004 | ✅ implemented |
+| 0006 | orchestrator-foundation | Go HTTP server, rutas `/v1/*`, request context, logging | 0005 | ✅ implemented |
+| 0007 | create-agent-flow | `POST /v1/agents` (blank, template, ai-assist, github) — MVP: solo sube `CLAUDE.md` | 0003, 0006 | ✅ implemented |
+| 0008 | run-agent-flow | `POST /v1/agents/{id}/runs` + Claude Code subprocess + workspace aislado + concurrencia | 0006, 0007 | 🔲 skeleton |
+| 0009 | provider-credentials | CRUD `/v1/orgs/{id}/credentials` — registrar, rotar, validar API key | 0002, 0006 | 🔲 skeleton |
+| 0010 | seed-fixture | Script seed: 2 orgs / 2 grupos / 3 usuarios / 3 roles + helpers para tests | 0005 | 🔲 skeleton |
+| 0011 | leak-test | Acceptance gate: 0 rows / 0 objetos de otro tenant retornados a Usuario A | 0008, 0010 | 🔲 skeleton |
+| 0012 | rbac-test | Acceptance gate: operaciones fuera de rol retornan 403 | 0008, 0010 | 🔲 skeleton |
 
 ## §8. Declaración POA
 
@@ -355,6 +355,23 @@ Conjunto estándar de la factory (ya instalado):
 | `current_tenant()` con múltiples memberships | Media | Alto | `LIMIT 1` en MVP; multi-group es post-MVP |
 | Claude Code CLI breaking change | Baja | Alto | Pin de versión; detectado en tests de integración Task 0008 |
 
-## §11. Preguntas abiertas
+## §11. Decisiones de implementación (Tasks 0004–0007)
+
+Decisiones tomadas durante la implementación que completan o ajustan el diseño del RFC:
+
+| Decisión | Tarea | Detalle |
+|---|---|---|
+| `ContextWithJWT` + `JWTFromContext` | 0004 | El JWT del usuario se almacena en el request context (además del `user_id`) para que handlers downstream puedan usarlo en calls a Supabase sin recibirlo como parámetro explícito. |
+| `anthropic_key bytea` en `org_credentials` | 0001 | `pgp_sym_encrypt` retorna `bytea`; almacenar como `text` requeriría conversión base64 que rompe `pgp_sym_decrypt`. La columna es `bytea` en la migración real. |
+| `get_org_anthropic_key()` security-definer | 0002 (pendiente) | Task 0007 (`ai-assist`) llama a `/rpc/get_org_anthropic_key` para obtener la clave desencriptada server-side. Task 0002 debe crear esta función. Mismo patrón que `current_tenant()`. |
+| `AgentStore` interface en `internal/handlers/` | 0007 | Hexagonal: la interfaz vive en el paquete consumidor (handlers), no en un paquete de Supabase. `SupabaseAgentStore` es el adaptador concreto. Mismo patrón que `TenantQuerier` en 0005. |
+| MVP scope `CLAUDE.md` solamente | 0007 | Template y GitHub sources solo fetched/suben `CLAUDE.md`. La copia de `templates/{id}/*` y fetch de `.houston/` es post-MVP. Documentado en Out of scope de Task 0007. |
+| `RequireRole(RoleManager)` en `POST /v1/agents` | 0006→0007 | Task 0006 registró el stub con `RequireRole(RoleMember)`. Task 0007 eleva el gate a `RoleManager` al wirear el handler real. El test AC4 de 0006 fue actualizado para reflejar el cambio. |
+| `AnthropicBaseURL` inyectable en handler | 0007 | `CreateAgent(store, anthropicURL string)` — URL vacía defaultea a `https://api.anthropic.com`. Permite mockear la API en tests de integración sin modificar código de producción. |
+| Go 1.22 Enhanced ServeMux | 0006 | `go.mod` bumpeado de 1.21 → 1.22 para habilitar patrones `METHOD /path/{param}` sin router externo (gorilla/mux, chi). |
+
+## §12. Preguntas abiertas
 
 - [x] ~~BYOA provider — ¿Opción A o Opción B?~~ **Resuelto:** Opción A. API key por org en `org_credentials`. Relay OAuth diferido a post-MVP.
+- [ ] **`get_org_anthropic_key()` SQL** — Task 0002 debe definir esta función security-definer. ¿Usa Vault de Supabase o `pgp_sym_decrypt` con una master key en env var?
+- [ ] **Bucket name** — Task 0003 debe confirmar el nombre del bucket Storage (`houston` vs `houston-agents`). Task 0007 asume `houston` con path `{org_id}/{group_id}/agents/{agent_id}/CLAUDE.md`.
