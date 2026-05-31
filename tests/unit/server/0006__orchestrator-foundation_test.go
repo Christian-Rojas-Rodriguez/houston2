@@ -287,8 +287,6 @@ func TestPostAgents_ValidJWT_RoleMember_RequireMember_Returns200Stub(t *testing.
 // not RequireRole(RoleManager). To exercise AC5 directly against the middleware
 // we build a mini handler chain using the middleware package.
 func TestPostAgents_ValidJWT_RoleMember_RequireManager_Returns403(t *testing.T) {
-	cfg := testServerConfig("https://fake.supabase.co")
-
 	// Wire a TenantMiddleware → RequireRole(RoleManager) chain manually,
 	// using the auth.AuthMiddleware so the full stack is exercised.
 	q := &stubQuerier{
