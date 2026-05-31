@@ -2,8 +2,8 @@
 task: "0003"
 slug: storage-layout
 granularity: slice
-version: 0.1.0
-status: draft
+version: 0.1.1
+status: done
 declares:
   - type: policy
     name: storage-layout
