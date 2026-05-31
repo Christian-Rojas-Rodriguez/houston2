@@ -3,7 +3,7 @@ task: "0007"
 slug: create-agent-flow
 granularity: slice
 version: 0.1.0
-status: implemented
+status: ready
 declares:
   - type: handler
     name: create-agent-flow
@@ -139,7 +139,9 @@ func NewSupabaseAgentStore(supabaseURL, anonKey string) *SupabaseAgentStore
 // Both use auth.NewUserClient(jwt). Never the service_role key.
 
 // GetTemplate implementation:
-//   GET {SupabaseURL}/storage/v1/object/templates/{templateID}/CLAUDE.md
+//   GET {SupabaseURL}/storage/v1/object/houston/templates/{templateID}/CLAUDE.md
+//   (bucket=houston; object name=templates/{templateID}/CLAUDE.md — Task 0003 has a
+//    single bucket `houston`; templates_readonly covers name LIKE 'templates/%')
 //   Authorization: Bearer jwt, apikey: AnonKey
 //   Returns ErrTemplateNotFound on 404.
 
@@ -149,6 +151,10 @@ func NewSupabaseAgentStore(supabaseURL, anonKey string) *SupabaseAgentStore
 //   Body: {}
 //   Returns ErrNoCredentials on empty response or 404.
 ```
+
+### Reconciliación R-TEMPLATES (fix de bucket)
+
+La implementación de `GetTemplate` apuntaba al bucket `templates` (`/storage/v1/object/templates/...`), que **no existe**: Task 0003 crea un único bucket `houston` y la policy `templates_readonly` cubre objetos en `houston` cuyo `name` empieza con `templates/`. El seed (`scripts/seed-templates.sh`) sube a `houston` con name `templates/sales/CLAUDE.md`. **Fix:** `GetTemplate` lee de `/storage/v1/object/houston/templates/{id}/CLAUDE.md`. El bug no se detectaba porque los tests de 0007 mockean el `AgentStore` (mismo patrón que ocultó R-STORAGE). Se agrega un test de integración real (`tests/integration/0007__get-template_test.go`, build-tagged `integration`) que ejerce el path contra Storage local. **Bump propuesto: patch (auditor al merge).**
 
 ### Blank CLAUDE.md skeleton
 
