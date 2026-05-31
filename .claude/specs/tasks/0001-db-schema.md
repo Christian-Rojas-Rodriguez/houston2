@@ -163,9 +163,34 @@ $$;
 
 `STABLE` se agrega porque la función no modifica la base de datos y retorna el mismo resultado dentro de una transacción — permite al planner de Postgres cachear el resultado dentro de una query, importante para las políticas RLS de Task 0002 que la llaman múltiples veces.
 
-### Integración con Supabase CLI
+### Ejecución / deployment
 
-Las migraciones se aplican con `supabase db push` (Supabase cloud) o `supabase db reset` (local). El archivo debe ser idempotente si se wrappea con `IF NOT EXISTS` donde aplica, o confiar en el historial de migraciones de Supabase para evitar re-aplicación.
+El proyecto Supabase ya está vinculado a un proyecto cloud real. El archivo `.temp/linked-project.json` presente en `supabase/` confirma el vínculo — no es necesario correr `supabase link`.
+
+**Detalle del proyecto vinculado:**
+- Ref: `sjstvuqdiowyzuockwds`
+- Nombre: `houston2`
+- Región: `us-east-2`
+- CLI instalada localmente: `2.102.0`
+
+**Flujo de aplicación:**
+
+1. **Iteración local (antes de push):**
+   ```
+   supabase start           # levanta la pila local (Postgres + Auth + Storage)
+   supabase db reset        # aplica todas las migraciones en `supabase/migrations/` desde cero
+   ```
+   Usar `supabase db reset` durante el desarrollo permite iterar sobre el DDL sin afectar el proyecto cloud.
+
+2. **Deploy a cloud:**
+   ```
+   supabase db push
+   ```
+   `supabase db push` lee el proyecto vinculado desde `.temp/linked-project.json` y aplica las migraciones pendientes contra el proyecto `sjstvuqdiowyzuockwds`. No es necesario pasar `--project-ref` ni autenticarse interactivamente si ya existe la sesión local del CLI.
+
+**Idempotencia:** Supabase CLI registra cada migración aplicada en la tabla interna `supabase_migrations.schema_migrations`. Re-ejecutar `supabase db push` contra el mismo proyecto omite archivos ya aplicados — la operación es idempotente al nivel de archivo de migración.
+
+**Dependencia forward — `pgp_sym_encrypt` key (Task 0009):** La columna `org_credentials.anthropic_key` se define como `bytea` cifrada con `pgp_sym_encrypt(plaintext, vault_key)`. La `vault_key` debe existir como Vault secret en el proyecto cloud **antes** de que se escriban filas en `org_credentials`. Crear ese secret es responsabilidad de Task 0009 (`provider-credentials`). Esta task solo define el esquema; no escribe rows ni configura el Vault secret.
 
 ### Decisiones de diseño tomadas
 
@@ -198,6 +223,8 @@ Las migraciones se aplican con `supabase db push` (Supabase cloud) o `supabase d
 11. RLS está habilitado en las seis tablas (`SELECT relrowsecurity FROM pg_class WHERE relname IN (...)` devuelve `true` para cada una).
 12. La función `current_tenant()` existe en el esquema `public`, tiene `SECURITY DEFINER`, y al llamarla como un usuario con fila en `memberships` retorna `(org_id, group_id, role)` correctos para ese usuario.
 13. La función `current_tenant()` retorna cero filas cuando el `auth.uid()` no tiene ninguna fila en `memberships`.
+14. `supabase db push` ejecutado contra el proyecto vinculado (`sjstvuqdiowyzuockwds`) finaliza sin errores y sin prompts interactivos.
+15. `supabase migration list` muestra la migración `<timestamp>_db-schema` como **applied** tanto en el entorno local (después de `supabase db reset`) como en el remoto (después de `supabase db push`).
 
 ## Out of scope
 
