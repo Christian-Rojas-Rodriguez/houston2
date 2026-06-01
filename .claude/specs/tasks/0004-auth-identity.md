@@ -3,7 +3,7 @@ task: "0004"
 slug: auth-identity
 granularity: slice
 version: 0.1.0
-status: implemented
+status: ready
 declares:
   - type: handler
     name: auth-identity
@@ -18,6 +18,8 @@ scope:
 
 > Supabase project propio + Google SSO PKCE + loopback redirect implementado en Go. No reusa el project de Houston (credenciales baked-in en Tauri). Establece quién es el usuario; la autorización (org/grupo/rol) la maneja Task 0005.
 
+> **Reapertura (2026-05-31) — fix R-AUTH-ES256.** El `AuthMiddleware` original validaba **solo HS256**, pero Supabase (local + cloud moderno) firma los tokens de login con **claves asimétricas (ES256)** publicadas en un JWKS (`{SUPABASE_URL}/auth/v1/.well-known/jwks.json`). → rechazaba **todo token real de login** con 401. No se cazó porque todos los tests hand-mintean tokens HS256. Fix: `validateJWT` ahora resuelve la clave pública por `kid` desde el JWKS para ES256/RS256, manteniendo HS256 (secret legacy) como fallback. Verificado con un token ES256 real del stack local (GET /v1/agents/{id} → 200, antes 401).
+
 ## What
 
 A developer or end user running the Houston 2.0 orquestador locally can authenticate with Google via a browser and have the resulting Supabase JWT validated by the Go server. Specifically:
@@ -25,7 +27,7 @@ A developer or end user running the Houston 2.0 orquestador locally can authenti
 - `.env.example` is present at the repo root with four documented variables: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_JWT_SECRET`, and `SERVER_PORT`. A developer can copy it to `.env` and fill in the values without reading any other file.
 - The Go server exposes `GET /auth/login` which redirects the browser to the Supabase Google SSO authorization URL using PKCE (code_challenge + code_verifier). A CSRF state token is generated per request, stored in a signed cookie (`SameSite=Lax`, `HttpOnly`), and included in the redirect.
 - The Go server exposes `GET /auth/callback` which: (a) validates the CSRF state cookie against the `state` query parameter, (b) exchanges the `code` query parameter with Supabase for a JWT, and (c) returns the JWT as `{ "token": "<jwt>" }` for curl-driven MVP usage.
-- A reusable middleware function `AuthMiddleware` in package `internal/auth` reads the `Authorization: Bearer <token>` header, validates the JWT signature using `SUPABASE_JWT_SECRET` (HS256), rejects expired or malformed tokens with HTTP 401, and places the validated `user_id` (UUID) in the request context.
+- A reusable middleware function `AuthMiddleware` in package `internal/auth` reads the `Authorization: Bearer <token>` header and validates the JWT signature: **asymmetric ES256/RS256** via the project JWKS (`{SUPABASE_URL}/auth/v1/.well-known/jwks.json`, key resolved by `kid`) — the modern Supabase default — **and** legacy **HS256** via `SUPABASE_JWT_SECRET` as fallback. Rejects expired/malformed/wrong-signature tokens with HTTP 401, and places the validated `user_id` (UUID) in the request context.
 - An exported accessor `UserIDFromContext(ctx context.Context) (uuid.UUID, bool)` in `internal/auth` is the single point of contract for downstream tasks (Task 0005) to read the authenticated identity.
 
 No RBAC, no org/group derivation, no role enforcement occurs in this task — those are Task 0005's responsibility.
@@ -36,7 +38,7 @@ No RBAC, no org/group derivation, no role enforcement occurs in this task — th
 - **Why PKCE:** Implicit flow leaks tokens in the browser URL and has been deprecated by OAuth 2.1. PKCE is the correct pattern for a local loopback redirect (RFC §4.9). The CSRF state parameter + signed cookie guard against open-redirect attacks.
 - **Why a dedicated Supabase project:** Houston's Supabase credentials are baked-in at Tauri build time via Vite compile-time substitution — there is no way to reuse them (RFC §4.9, RFC §5 alternatives table).
 - **Why this task before 0005:** Task 0005 (rbac-middleware) has a hard dependency on Task 0004 (workflow §4 dependency graph: `AU → RB`). It consumes `UserIDFromContext` and `AuthMiddleware`. Without Task 0004, Task 0005 cannot be built or tested.
-- **Why HS256 / `SUPABASE_JWT_SECRET`:** Supabase issues JWTs signed with HS256. Validating the signature is what makes the token trustworthy. Trusting claims without verification allows any client to forge a `user_id`.
+- **Why JWKS (ES256) + HS256:** Supabase issues login JWTs signed with **asymmetric keys (ES256)** by default; the public keys are published at the project JWKS endpoint. Validating against the JWKS (by `kid`) is what makes real login tokens trustworthy. The legacy HS256 `SUPABASE_JWT_SECRET` path is kept as fallback (Supabase dual-validates). Trusting claims without verification allows any client to forge a `user_id`.
 
 ## How
 
