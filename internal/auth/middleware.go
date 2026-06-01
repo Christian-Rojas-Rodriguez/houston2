@@ -22,7 +22,7 @@ func AuthMiddleware(cfg Config) func(http.Handler) http.Handler {
 				return
 			}
 
-			userID, err := validateJWT(token, cfg.JWTSecret)
+			userID, err := validateJWT(token, cfg.JWTSecret, cfg.SupabaseURL)
 			if err != nil {
 				writeAuthError(w, "invalid or expired token")
 				return
@@ -43,17 +43,31 @@ func extractBearer(r *http.Request) string {
 	return strings.TrimPrefix(h, "Bearer ")
 }
 
-func validateJWT(tokenString, secret string) (uuid.UUID, error) {
+// validateJWT verifies a Supabase token. It accepts both the legacy HS256
+// symmetric secret AND asymmetric ES256/RS256 tokens (the modern Supabase
+// default), resolving the public key by `kid` from the project JWKS.
+func validateJWT(tokenString, secret, supabaseURL string) (uuid.UUID, error) {
 	token, err := jwt.ParseWithClaims(
 		tokenString,
 		&jwt.RegisteredClaims{},
 		func(t *jwt.Token) (any, error) {
-			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+			switch t.Method.(type) {
+			case *jwt.SigningMethodHMAC:
+				if secret == "" {
+					return nil, jwt.ErrSignatureInvalid
+				}
+				return []byte(secret), nil
+			case *jwt.SigningMethodECDSA, *jwt.SigningMethodRSA:
+				kid, _ := t.Header["kid"].(string)
+				if kid == "" || supabaseURL == "" {
+					return nil, jwt.ErrSignatureInvalid
+				}
+				return publicKeyForKID(supabaseURL, kid)
+			default:
 				return nil, jwt.ErrSignatureInvalid
 			}
-			return []byte(secret), nil
 		},
-		jwt.WithValidMethods([]string{"HS256"}),
+		jwt.WithValidMethods([]string{"HS256", "ES256", "RS256"}),
 		jwt.WithExpirationRequired(),
 	)
 	if err != nil {
