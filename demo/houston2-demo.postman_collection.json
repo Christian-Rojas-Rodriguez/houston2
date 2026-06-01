@@ -1,0 +1,186 @@
+{
+  "info": {
+    "name": "Houston 2.0 — Demo (flujo real de un equipo)",
+    "description": "Flujo narrativo y vistoso del control plane multi-tenant.\n\n**La historia:** *Demo Co* entra a Houston. Sus roles (member / manager / owner) operan según sus permisos. Un manager **crea un agente desde un template curado** y lo prueba con **escenarios de venta reales** (conversación de varios turnos). El equipo usa además su **agente general** (compartido en el org). Y se demuestra el **aislamiento total** entre tenants.\n\n**Antes de correr:**\n1. `bash demo/setup.sh` (Supabase + fixture)\n2. `bash demo/seed-demo-content.sh` (template + persona del agente general)\n3. `bash demo/serve.sh` (orquestador, con ANTHROPIC_API_KEY)\n\nLas variables (`server_url`, `supabase_url`, `supabase_anon_key`) ya vienen seteadas para local. Corré **carpeta por carpeta, en orden**. Para ver la respuesta de Claude en los runs, abrí la **Postman Console** (⌥⌘C).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "server_url", "value": "http://localhost:8080" },
+    { "key": "supabase_url", "value": "http://127.0.0.1:54321" },
+    { "key": "supabase_anon_key", "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0" },
+    { "key": "template_id", "value": "sales-pro" },
+    { "key": "agent_general", "value": "00000010-0000-0000-0002-000000000001" },
+    { "key": "agent_org2", "value": "00000010-0000-0000-0002-000000000002" },
+    { "key": "org1", "value": "00000010-0000-0000-0000-000000000001" },
+    { "key": "org2", "value": "00000010-0000-0000-0000-000000000002" },
+    { "key": "member_token", "value": "" },
+    { "key": "manager_token", "value": "" },
+    { "key": "owner_token", "value": "" },
+    { "key": "created_agent_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "🏢 1 · Onboarding — el equipo entra a Houston",
+      "description": "Demo Co se conecta. Tres personas, tres roles, autenticadas con JWT real de Supabase (ES256).",
+      "item": [
+        {
+          "name": "Health del orquestador",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('orquestador vivo (200)', () => pm.response.code === 200);"
+          ] } }],
+          "request": { "method": "GET", "header": [], "url": "{{server_url}}/health",
+            "description": "El orquestador Go: identidad + RBAC + orquestación de Claude Code." }
+        },
+        {
+          "name": "Login — Sofía (member)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.code === 200);",
+            "pm.collectionVariables.set('member_token', pm.response.json().access_token);"
+          ] } }],
+          "request": { "method": "POST",
+            "header": [ { "key": "apikey", "value": "{{supabase_anon_key}}" }, { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"user-a@houston-fixture.test\",\n  \"password\": \"houston-fixture-pass-A\"\n}" },
+            "url": "{{supabase_url}}/auth/v1/token?grant_type=password",
+            "description": "Sofía — `group:member` del equipo (grupo general de Demo Co)." }
+        },
+        {
+          "name": "Login — Martín (manager)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.code === 200);",
+            "pm.collectionVariables.set('manager_token', pm.response.json().access_token);"
+          ] } }],
+          "request": { "method": "POST",
+            "header": [ { "key": "apikey", "value": "{{supabase_anon_key}}" }, { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"user-b@houston-fixture.test\",\n  \"password\": \"houston-fixture-pass-B\"\n}" },
+            "url": "{{supabase_url}}/auth/v1/token?grant_type=password",
+            "description": "Martín — `group:manager`, líder de un grupo de Demo Co." }
+        },
+        {
+          "name": "Login — Lucía (owner)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.code === 200);",
+            "pm.collectionVariables.set('owner_token', pm.response.json().access_token);"
+          ] } }],
+          "request": { "method": "POST",
+            "header": [ { "key": "apikey", "value": "{{supabase_anon_key}}" }, { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"user-c@houston-fixture.test\",\n  \"password\": \"houston-fixture-pass-C\"\n}" },
+            "url": "{{supabase_url}}/auth/v1/token?grant_type=password",
+            "description": "Lucía — `org:owner` (de otra organización; la usamos para mostrar aislamiento)." }
+        }
+      ]
+    },
+    {
+      "name": "🔒 2 · Permisos por rol (RBAC)",
+      "item": [
+        {
+          "name": "Sofía (member) intenta crear un agente → 403",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('403 forbidden', () => pm.response.code === 403);",
+            "pm.test('error.code = forbidden', () => pm.response.json().error.code === 'forbidden');"
+          ] } }],
+          "request": { "method": "POST",
+            "header": [ { "key": "Authorization", "value": "Bearer {{member_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"agente-de-sofia\",\n  \"source\": \"blank\"\n}" },
+            "url": "{{server_url}}/v1/agents",
+            "description": "Crear agentes requiere `group:manager`+. Sofía es `member` → **403**, y el handler ni siquiera corre. El rol se deriva server-side de su membership, no se puede falsificar." }
+        }
+      ]
+    },
+    {
+      "name": "🤖 3 · Crear un agente desde un template",
+      "item": [
+        {
+          "name": "Martín (manager) crea \"Asistente de Ventas\" desde template",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('201 Created', () => pm.response.code === 201);",
+            "pm.collectionVariables.set('created_agent_id', pm.response.json().id);",
+            "console.log('🤖 agente creado:', pm.response.json().id);"
+          ] } }],
+          "request": { "method": "POST",
+            "header": [ { "key": "Authorization", "value": "Bearer {{manager_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Asistente de Ventas\",\n  \"source\": \"template\",\n  \"template_id\": \"{{template_id}}\"\n}" },
+            "url": "{{server_url}}/v1/agents",
+            "description": "Martín arma un agente a partir del **template curado** `sales-pro`. El orquestador copia el `CLAUDE.md` del template (desde Storage) y lo deja como el cerebro del nuevo agente, scoped al grupo de Martín. El agente nace listo para vender." }
+        }
+      ]
+    },
+    {
+      "name": "💬 4 · Probar el agente — conversación de ventas real",
+      "description": "Martín prueba su agente con escenarios reales. El agente responde leyendo su CLAUDE.md (del template) — corre Claude Code de verdad. Abrí la Console (⌥⌘C) para leer las respuestas.",
+      "item": [
+        {
+          "name": "Turno 1 — objeción: ¿cómo garantizan el aislamiento?",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.code === 200);",
+            "pm.test('status done', () => pm.response.json().status === 'done');",
+            "console.log('🤖 ASISTENTE DE VENTAS:\\n' + pm.response.json().result);"
+          ] } }],
+          "request": { "method": "POST",
+            "header": [ { "key": "Authorization", "value": "Bearer {{manager_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"Un prospecto —Head of Engineering de una fintech de 300 personas— nos escribió: «Evaluamos 3 plataformas para correr agentes de IA internos. Nuestro mayor miedo es que los datos de un equipo se filtren a otro. ¿Cómo lo resuelve Houston?». Redactá una respuesta de ventas convincente, técnica pero clara, en 4-5 oraciones, y cerrá con un próximo paso.\"\n}" },
+            "url": "{{server_url}}/v1/agents/{{created_agent_id}}/runs",
+            "description": "El agente lee su contexto (persona de ventas + conocimiento de Houston) y redacta una respuesta de ventas. Tarda ~5-10s: es Claude Code real." }
+        },
+        {
+          "name": "Turno 2 — follow-up: objeción de precio",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.code === 200);",
+            "console.log('🤖 ASISTENTE DE VENTAS (follow-up):\\n' + pm.response.json().result);"
+          ] } }],
+          "request": { "method": "POST",
+            "header": [ { "key": "Authorization", "value": "Bearer {{manager_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"El prospecto respondió: «Me convence el aislamiento. Pero somos 300 usuarios y el presupuesto está ajustado este trimestre». Respondé manejando la objeción de precio sin dar números, y proponé un piloto acotado para destrabar.\"\n}" },
+            "url": "{{server_url}}/v1/agents/{{created_agent_id}}/runs",
+            "description": "Segundo turno: el agente maneja la objeción de precio y propone un próximo paso — un flujo de conversación realista." }
+        }
+      ]
+    },
+    {
+      "name": "👥 5 · El agente general del equipo (compartido en el org)",
+      "item": [
+        {
+          "name": "Sofía (member) usa el agente general del equipo",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200 OK', () => pm.response.code === 200);",
+            "pm.test('status done', () => pm.response.json().status === 'done');",
+            "console.log('🤖 ASISTENTE DEL EQUIPO:\\n' + pm.response.json().result);"
+          ] } }],
+          "request": { "method": "POST",
+            "header": [ { "key": "Authorization", "value": "Bearer {{member_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"¡Hola! Soy nuevo en el equipo de Demo Co. ¿Qué es Houston y cómo arranco? Dame 3 primeros pasos concretos.\"\n}" },
+            "url": "{{server_url}}/v1/agents/{{agent_general}}/runs",
+            "description": "Este agente vive en el **grupo general** del org → cualquier miembro lo usa. Sofía (member) lo corre para onboarding. Muestra el agente *en general* (compartido por todo el equipo), complementando el agente *de grupo* del paso 4." }
+        }
+      ]
+    },
+    {
+      "name": "🛡️ 6 · Aislamiento multi-tenant",
+      "item": [
+        {
+          "name": "Sofía intenta correr un agente de OTRA empresa → 404",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('404 — el agente de otro tenant no existe para ella', () => pm.response.code === 404);"
+          ] } }],
+          "request": { "method": "POST",
+            "header": [ { "key": "Authorization", "value": "Bearer {{member_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"esto no debería correr nunca\"\n}" },
+            "url": "{{server_url}}/v1/agents/{{agent_org2}}/runs",
+            "description": "Sofía (Demo Co) intenta correr un agente de **otra organización**. La RLS hace que ni siquiera lo *vea* → **404**. La fuga es imposible a nivel de datos, no solo de app." }
+        },
+        {
+          "name": "Sofía solo ve su propia org (RLS, capa de datos)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('200', () => pm.response.code === 200);",
+            "const ids = pm.response.json().map(o => o.id);",
+            "pm.test('ve su org', () => ids.includes(pm.collectionVariables.get('org1')));",
+            "pm.test('NO ve la otra org (sin fuga)', () => !ids.includes(pm.collectionVariables.get('org2')));"
+          ] } }],
+          "request": { "method": "GET",
+            "header": [ { "key": "apikey", "value": "{{supabase_anon_key}}" }, { "key": "Authorization", "value": "Bearer {{member_token}}" } ],
+            "url": "{{supabase_url}}/rest/v1/organizations?select=id,name",
+            "description": "La garantía en la base de datos: Sofía consulta PostgREST directo con su JWT. La RLS de Postgres filtra — solo ve su org; la otra **nunca** aparece. Esto es lo que cubre el leak-test (gate automático del MVP)." }
+        }
+      ]
+    }
+  ]
+}
