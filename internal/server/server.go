@@ -12,15 +12,17 @@ import (
 	"github.com/nomenclator/houston2/internal/auth"
 	"github.com/nomenclator/houston2/internal/handlers"
 	"github.com/nomenclator/houston2/internal/middleware"
+	"github.com/nomenclator/houston2/internal/runtime"
 )
 
 // Config holds the server configuration.
 type Config struct {
-	SupabaseURL string
-	AnonKey     string
-	JWTSecret   string
-	Port        string
-	LogLevel    string
+	SupabaseURL     string
+	AnonKey         string
+	JWTSecret       string
+	Port            string
+	LogLevel        string
+	AnthropicAPIKey string
 }
 
 // LoadConfig reads configuration from environment variables with safe defaults.
@@ -34,11 +36,12 @@ func LoadConfig() Config {
 		logLevel = "info"
 	}
 	return Config{
-		SupabaseURL: os.Getenv("SUPABASE_URL"),
-		AnonKey:     os.Getenv("SUPABASE_ANON_KEY"),
-		JWTSecret:   os.Getenv("SUPABASE_JWT_SECRET"),
-		Port:        port,
-		LogLevel:    logLevel,
+		SupabaseURL:     os.Getenv("SUPABASE_URL"),
+		AnonKey:         os.Getenv("SUPABASE_ANON_KEY"),
+		JWTSecret:       os.Getenv("SUPABASE_JWT_SECRET"),
+		Port:            port,
+		LogLevel:        logLevel,
+		AnthropicAPIKey: os.Getenv("ANTHROPIC_API_KEY"),
 	}
 }
 
@@ -138,7 +141,18 @@ func (s *Server) buildHandler(cfg Config, q middleware.TenantQuerier, logger *sl
 		),
 	)
 
+	// POST /v1/agents/{id}/runs — run-agent flow (Task 0008), requires RoleMember.
+	runStore := handlers.NewSupabaseRunStore(cfg.SupabaseURL, cfg.AnonKey)
+	runProtected := auth.AuthMiddleware(authCfg)(
+		middleware.TenantMiddleware(q)(
+			middleware.RequireRole(middleware.RoleMember)(
+				handlers.CreateRun(runStore, runtime.NewClaudeRunner(), cfg.AnthropicAPIKey),
+			),
+		),
+	)
+
 	mux.Handle("POST /v1/agents", agentProtected)
+	mux.Handle("POST /v1/agents/{id}/runs", runProtected)
 	mux.Handle("GET /v1/agents/{id}", protected)
 	mux.Handle("POST /v1/runs", protected)
 	mux.Handle("GET /v1/runs/{id}", protected)
