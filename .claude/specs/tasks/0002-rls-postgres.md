@@ -3,7 +3,7 @@ task: "0002"
 slug: rls-postgres
 granularity: slice
 version: 0.1.1
-status: done
+status: ready
 declares:
   - type: policy
     name: rls-postgres
@@ -16,6 +16,8 @@ scope:
 # Task 0002 — `rls-postgres`
 
 > Políticas RLS en todas las tablas tenant-scoped + verificación del helper `current_tenant()` (security definer). Aquí vive el aislamiento real: ninguna query mal formada puede retornar datos de otro tenant.
+
+> **Reapertura (2026-05-31) — fix de recursión en cloud.** La policy de `groups` arreglada (recursion-proof, Option A) vive en `20260530000001_rls-postgres.sql`, pero **cloud tenía aplicada una versión vieja recursiva** (se pusheó una versión buggy bajo esa misma `version` antes del fix; Supabase no re-aplica). Síntoma: `infinite recursion detected in policy for relation "groups"` (42P17) en toda query a groups/agents/runs/storage en cloud. Fix: migración forward append-only `20260531000002_rls-groups-recursion-fix.sql` que DROP+CREATE **solo** la policy de `groups` con la versión correcta + `supabase db push`. Local ya estaba bien. Las otras 5 policies no cambiaron entre eras (solo groups).
 
 ## What
 
