@@ -1,0 +1,281 @@
+{
+  "info": {
+    "name": "Houston 2.0 — E2E Demo (tenant + Supabase + Claude)",
+    "description": "Flujo end-to-end del control plane multi-tenant de Houston 2.0.\n\nMuestra, en orden: (1) login de 3 actores (member/manager/owner), (2) RBAC por rol (403), (3) crear un agente, (4) **correr el agente con Claude Code real** trayendo el contexto desde Supabase Storage, y (5) aislamiento multi-tenant (cross-org 404 + no-leak de datos vía RLS).\n\nVariables a setear en el Environment o en la colección:\n- `server_url`     → la URL del orquestador Go (ej. http://localhost:8080)\n- `supabase_url`   → la URL de Supabase (local http://127.0.0.1:54321 o cloud https://<ref>.supabase.co)\n- `supabase_anon_key` → la anon key del proyecto\n\nLos tokens (member/manager/owner) y el `created_agent_id` se guardan solos al correr los requests en orden (Run Collection).\n\nPre-requisitos: orquestador corriendo con ANTHROPIC_API_KEY seteada, `claude` CLI instalado, y el fixture sembrado (scripts/seed.go). Ver demo/DEMO_RUNBOOK.md.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "server_url", "value": "http://localhost:8080" },
+    { "key": "supabase_url", "value": "http://127.0.0.1:54321" },
+    { "key": "supabase_anon_key", "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0" },
+    { "key": "agent_org1", "value": "00000010-0000-0000-0002-000000000001" },
+    { "key": "agent_org2", "value": "00000010-0000-0000-0002-000000000002" },
+    { "key": "org1", "value": "00000010-0000-0000-0000-000000000001" },
+    { "key": "org2", "value": "00000010-0000-0000-0000-000000000002" },
+    { "key": "member_token", "value": "" },
+    { "key": "manager_token", "value": "" },
+    { "key": "owner_token", "value": "" },
+    { "key": "created_agent_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "0 · Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.code === 200);",
+                  "pm.test('status ok', () => pm.response.json().status === 'ok');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{server_url}}/health",
+            "description": "Sanity check: el orquestador Go está vivo (sin auth)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "1 · Auth (login de los 3 actores)",
+      "description": "Obtiene un JWT real de Supabase (ES256) por actor vía password-grant. En producción esto es Google SSO PKCE; para la demo usamos los usuarios fixture.",
+      "item": [
+        {
+          "name": "Login — Member (A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.code === 200);",
+                  "const t = pm.response.json().access_token;",
+                  "pm.collectionVariables.set('member_token', t);",
+                  "pm.test('token recibido', () => !!t);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_anon_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"user-a@houston-fixture.test\",\n  \"password\": \"houston-fixture-pass-A\"\n}" },
+            "url": "{{supabase_url}}/auth/v1/token?grant_type=password",
+            "description": "Usuario A — `group:member` en Org 1 / Grupo general."
+          }
+        },
+        {
+          "name": "Login — Manager (B)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.code === 200);",
+                  "pm.collectionVariables.set('manager_token', pm.response.json().access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_anon_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"user-b@houston-fixture.test\",\n  \"password\": \"houston-fixture-pass-B\"\n}" },
+            "url": "{{supabase_url}}/auth/v1/token?grant_type=password",
+            "description": "Usuario B — `group:manager` en Org 1 / Grupo 2."
+          }
+        },
+        {
+          "name": "Login — Owner (C)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.code === 200);",
+                  "pm.collectionVariables.set('owner_token', pm.response.json().access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_anon_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"user-c@houston-fixture.test\",\n  \"password\": \"houston-fixture-pass-C\"\n}" },
+            "url": "{{supabase_url}}/auth/v1/token?grant_type=password",
+            "description": "Usuario C — `org:owner` en Org 2."
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 · RBAC (rol → 403)",
+      "item": [
+        {
+          "name": "Member crea agente → 403 forbidden",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('403 forbidden', () => pm.response.code === 403);",
+                  "pm.test('error.code = forbidden', () => pm.response.json().error.code === 'forbidden');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{member_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"intento-de-member\",\n  \"source\": \"blank\"\n}" },
+            "url": "{{server_url}}/v1/agents",
+            "description": "El RBAC se enforce en el middleware: crear agentes requiere `group:manager`+. Un `member` recibe 403 — el handler nunca corre."
+          }
+        }
+      ]
+    },
+    {
+      "name": "3 · Crear agente (Manager)",
+      "item": [
+        {
+          "name": "Manager crea agente → 201",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.code === 201);",
+                  "const id = pm.response.json().id;",
+                  "pm.collectionVariables.set('created_agent_id', id);",
+                  "pm.test('devuelve id', () => !!id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{manager_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Demo Sales Agent\",\n  \"source\": \"blank\"\n}" },
+            "url": "{{server_url}}/v1/agents",
+            "description": "Crea el agente scoped al tenant del manager: fila en `agents` + un `CLAUDE.md` en Storage bajo `houston/{org}/{group}/agents/{id}/`. Soporta 4 fuentes (blank, template, ai-assist, github)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "4 · ⭐ Correr agente (Claude Code real)",
+      "item": [
+        {
+          "name": "Member corre agente de su grupo → 200 + salida de claude",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.code === 200);",
+                  "const j = pm.response.json();",
+                  "pm.test('status done', () => j.status === 'done');",
+                  "pm.test('claude respondió', () => typeof j.result === 'string' && j.result.length > 0);",
+                  "console.log('🤖 CLAUDE:', j.result);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{member_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"Leé tu CLAUDE.md de contexto. ¿Para qué org y grupo estás configurado? Respondé en una línea.\"\n}" },
+            "url": "{{server_url}}/v1/agents/{{agent_org1}}/runs",
+            "description": "EL MOMENTO CLAVE. El orquestador: verifica acceso al agente (RLS) → INSERT run(pending) → crea un workspace aislado → **descarga el contexto del agente desde Supabase Storage** → lanza `claude` (Claude Code) como subprocess local con la API key inyectada → captura la salida → persiste el run. La respuesta es lo que Claude generó leyendo el contexto del tenant."
+          }
+        }
+      ]
+    },
+    {
+      "name": "5 · Aislamiento multi-tenant",
+      "item": [
+        {
+          "name": "Cross-org: Member (Org1) corre agente de Org2 → 404",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 — el agente de otro tenant NO existe para A', () => pm.response.code === 404);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{member_token}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"prompt\": \"esto no debería correr\"\n}" },
+            "url": "{{server_url}}/v1/agents/{{agent_org2}}/runs",
+            "description": "Aislamiento real: A (Org 1) intenta correr un agente de Org 2. La RLS hace que A ni siquiera lo *vea* → 404 (no 403). La fuga es imposible a nivel de datos, no solo de app."
+          }
+        },
+        {
+          "name": "Data-level: Member ve solo su org (RLS)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.code === 200);",
+                  "const orgs = pm.response.json().map(o => o.id);",
+                  "pm.test('ve su propia org (Org1)', () => orgs.includes(pm.collectionVariables.get('org1')));",
+                  "pm.test('NO ve Org2 (no-leak)', () => !orgs.includes(pm.collectionVariables.get('org2')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_anon_key}}" },
+              { "key": "Authorization", "value": "Bearer {{member_token}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/organizations?select=id,name",
+            "description": "Bonus — la garantía en la capa de datos: A consulta PostgREST directamente con su JWT. La RLS de Postgres filtra: A solo ve Org 1; Org 2 nunca aparece. Esto es lo que cubre el leak-test (gate automático del MVP)."
+          }
+        }
+      ]
+    }
+  ]
+}

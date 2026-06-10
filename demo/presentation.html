@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Houston 2.0 — Control Plane Multi-Tenant para Agentes de IA</title>
+<style>
+  :root{
+    --bg:#0a0e1a; --bg2:#0f1424; --ink:#e8ecf6; --muted:#9aa6c2;
+    --cyan:#35e0d2; --violet:#8b7dff; --pink:#ff7eb6; --green:#5be88a;
+    --red:#ff6b6b; --amber:#ffc24b; --line:rgba(255,255,255,.10);
+    --card:rgba(255,255,255,.045);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:radial-gradient(1200px 700px at 80% -10%, #16203a 0%, var(--bg) 55%) fixed;
+    color:var(--ink);
+    font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .deck{height:100vh;overflow:hidden;position:relative}
+  .slide{
+    position:absolute;inset:0;display:none;flex-direction:column;justify-content:center;
+    padding:6vh 8vw;opacity:0;transform:translateY(14px);transition:opacity .35s,transform .35s;
+  }
+  .slide.active{display:flex;opacity:1;transform:none}
+  h1{font-size:clamp(34px,5.2vw,68px);line-height:1.04;margin:.1em 0;letter-spacing:-.02em}
+  h2{font-size:clamp(26px,3.4vw,42px);margin:0 0 .5em;letter-spacing:-.01em}
+  h3{font-size:18px;margin:.2em 0;color:var(--cyan);text-transform:uppercase;letter-spacing:.12em;font-weight:700}
+  p{font-size:clamp(16px,1.5vw,21px);color:var(--muted);max-width:60ch;margin:.4em 0}
+  .lead{color:var(--ink)}
+  .grad{background:linear-gradient(100deg,var(--cyan),var(--violet) 60%,var(--pink));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .kicker{color:var(--cyan);font-weight:700;letter-spacing:.18em;text-transform:uppercase;font-size:13px;margin-bottom:14px}
+  .cols{display:grid;gap:22px;margin-top:18px}
+  .c2{grid-template-columns:1fr 1fr}.c3{grid-template-columns:repeat(3,1fr)}.c4{grid-template-columns:repeat(4,1fr)}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px 22px}
+  .card h4{margin:.1em 0 .35em;font-size:19px}
+  .card p{font-size:15px;margin:.2em 0}
+  .chip{display:inline-block;padding:4px 11px;border-radius:999px;border:1px solid var(--line);font-size:12.5px;color:var(--muted);margin:3px 5px 3px 0;background:rgba(255,255,255,.03)}
+  .chip.ok{color:var(--green);border-color:rgba(91,232,138,.35)}
+  .chip.warn{color:var(--amber);border-color:rgba(255,194,75,.3)}
+  ul.clean{list-style:none;padding:0;margin:.3em 0}
+  ul.clean li{padding:7px 0 7px 30px;position:relative;color:var(--ink);font-size:clamp(15px,1.45vw,19px)}
+  ul.clean li::before{content:"";position:absolute;left:4px;top:14px;width:9px;height:9px;border-radius:3px;background:linear-gradient(120deg,var(--cyan),var(--violet))}
+  .flow{display:flex;align-items:stretch;gap:14px;flex-wrap:wrap;margin-top:8px}
+  .node{flex:1;min-width:150px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 16px}
+  .node .t{font-weight:700;font-size:16px}.node .s{color:var(--muted);font-size:13px;margin-top:4px}
+  .node.api{border-color:rgba(53,224,210,.4)} .node.db{border-color:rgba(139,125,255,.4)} .node.ai{border-color:rgba(255,126,182,.4)}
+  .arrow{align-self:center;color:var(--muted);font-size:24px}
+  table{border-collapse:collapse;width:100%;margin-top:10px;font-size:clamp(13px,1.35vw,17px)}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left}
+  th{color:var(--cyan);font-weight:700;background:rgba(255,255,255,.03)}
+  td.no{color:var(--red);font-weight:700} td.yes{color:var(--green);font-weight:700} td.lim{color:var(--amber)}
+  code{font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:6px;font-size:.86em;color:#d7e2ff}
+  .big{font-size:clamp(40px,7vw,96px);font-weight:800;letter-spacing:-.03em;line-height:1}
+  .stat{display:flex;gap:30px;flex-wrap:wrap;margin-top:18px}
+  .stat .n{font-size:clamp(30px,4vw,52px);font-weight:800}
+  .stat .l{color:var(--muted);font-size:14px;margin-top:-4px}
+  .foot{position:absolute;left:8vw;right:8vw;bottom:3vh;display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:13px}
+  .dots{display:flex;gap:7px}
+  .dot{width:8px;height:8px;border-radius:99px;background:rgba(255,255,255,.18);cursor:pointer}
+  .dot.on{background:var(--cyan);transform:scale(1.25)}
+  .bar{position:absolute;top:0;left:0;height:3px;background:linear-gradient(90deg,var(--cyan),var(--violet));transition:width .3s}
+  .hint{position:absolute;right:8vw;bottom:3vh;color:var(--muted);font-size:12px;opacity:.7}
+  .pill{display:inline-block;background:rgba(53,224,210,.12);border:1px solid rgba(53,224,210,.4);color:var(--cyan);padding:6px 14px;border-radius:999px;font-size:13px;font-weight:700;margin-bottom:18px}
+  .quote{font-size:clamp(22px,2.8vw,36px);line-height:1.3;color:var(--ink);max-width:24ch;font-weight:600;letter-spacing:-.01em}
+</style>
+</head>
+<body>
+<div class="bar" id="bar"></div>
+<div class="deck" id="deck">
+
+  <!-- 1 — TITULO -->
+  <section class="slide">
+    <div class="pill">Houston 2.0 · Control Plane</div>
+    <h1>De single-tenant<br/>a <span class="grad">plataforma B2B multi-tenant</span><br/>para agentes de IA</h1>
+    <p class="lead" style="margin-top:18px">Un orquestador Go + <b>Supabase</b> (Postgres &amp; Storage RLS) + <b>Claude Code</b>. Aislamiento garantizado en la capa de datos. Agentes que corren de verdad, con el contexto de cada tenant.</p>
+    <div class="stat">
+      <div><div class="n grad">3</div><div class="l">roles RBAC</div></div>
+      <div><div class="n grad">2 capas</div><div class="l">de aislamiento (Postgres + Storage)</div></div>
+      <div><div class="n grad">e2e</div><div class="l">verificado contra Supabase real</div></div>
+    </div>
+  </section>
+
+  <!-- 2 — PROBLEMA -->
+  <section class="slide">
+    <div class="kicker">El problema</div>
+    <h2>Houston es genial… para un solo equipo</h2>
+    <div class="cols c2">
+      <div class="card">
+        <h4>Hoy (Houston referencia)</h4>
+        <ul class="clean">
+          <li>Single-tenant, local-first</li>
+          <li>15 crates de engine <b>sin</b> <code>org_id</code> / tenant</li>
+          <li>Módulos <code>teams/</code> y <code>cloud/</code> son stubs</li>
+          <li>No hay identidad, ni roles, ni aislamiento</li>
+        </ul>
+      </div>
+      <div class="card" style="border-color:rgba(53,224,210,.35)">
+        <h4>Para vender B2B se necesita</h4>
+        <ul class="clean">
+          <li>Múltiples organizaciones, grupos y usuarios</li>
+          <li>Roles y permisos (owner / manager / member)</li>
+          <li><b>Aislamiento real</b> entre tenants — no negociable</li>
+          <li>Que los agentes corran con el contexto de cada cliente</li>
+        </ul>
+      </div>
+    </div>
+    <p style="margin-top:16px">No forkeamos Houston. Construimos un <b>control plane multi-tenant por encima</b>.</p>
+  </section>
+
+  <!-- 3 — LA APUESTA -->
+  <section class="slide">
+    <div class="kicker">La decisión clave</div>
+    <h2>El aislamiento se garantiza en los <span class="grad">datos</span>, no en el código</h2>
+    <p class="lead">Un <code>if</code> en la aplicación se olvida, se rompe, se bypassa. Una <b>política RLS de Postgres</b> es la base de datos diciendo "no" — para toda query, siempre.</p>
+    <div class="cols c2" style="margin-top:8px">
+      <div class="card"><h4>Defensa en profundidad</h4><p>Aunque un handler tenga un bug de autorización, la RLS de Postgres y Storage es la última línea: ningún dato de otro tenant sale.</p></div>
+      <div class="card"><h4>Probado, no prometido</h4><p>Un <b>leak-test automático</b> actúa como gate de merge: si una sola fila u objeto de otro tenant se filtra, el build falla.</p></div>
+    </div>
+  </section>
+
+  <!-- 4 — ARQUITECTURA -->
+  <section class="slide">
+    <div class="kicker">Arquitectura</div>
+    <h2>Tres piezas, una invariante</h2>
+    <div class="flow">
+      <div class="node"><div class="t">Cliente</div><div class="s">curl / UI / Postman · JWT en cada request</div></div>
+      <div class="arrow">→</div>
+      <div class="node api"><div class="t">Orquestador Go</div><div class="s">Auth (ES256/JWKS) → deriva (org, grupo, rol) → RBAC 403 → handlers <code>/v1/*</code></div></div>
+      <div class="arrow">→</div>
+      <div class="node db"><div class="t">Supabase</div><div class="s">Postgres RLS · Storage RLS · Auth (Google SSO)</div></div>
+      <div class="arrow">+</div>
+      <div class="node ai"><div class="t">Claude Code</div><div class="s">subprocess local por run · workspace aislado · API key inyectada</div></div>
+    </div>
+    <p style="margin-top:18px">El orquestador <b>nunca</b> usa el service_role en paths de usuario: habla con Supabase con el <b>JWT del usuario</b>, así la RLS está siempre en efecto. El control plane es nuestro; el engine de Houston se reusa por debajo.</p>
+  </section>
+
+  <!-- 5 — MODELO TENANT -->
+  <section class="slide">
+    <div class="kicker">Modelo multi-tenant</div>
+    <h2>Organización → Grupos → Miembros</h2>
+    <div class="cols c3">
+      <div class="card"><h3>org:owner</h3><p>Dueño de la organización. Ve todos los grupos de su org, gestiona credenciales y miembros.</p></div>
+      <div class="card"><h3>group:manager</h3><p>Gestiona su grupo: crea agentes, administra a sus miembros.</p></div>
+      <div class="card"><h3>group:member</h3><p>Usa y corre los agentes de su grupo (y del grupo general del org).</p></div>
+    </div>
+    <p style="margin-top:18px">Una función <code>current_tenant()</code> (security-definer) deriva <b>(org_id, group_id, role)</b> desde la membership del usuario autenticado — la misma fuente de verdad para la RLS <i>y</i> para el RBAC del middleware. Imposible falsificar el tenant desde el cliente.</p>
+  </section>
+
+  <!-- 6 — AISLAMIENTO -->
+  <section class="slide">
+    <div class="kicker">Aislamiento en acción</div>
+    <h2>Cero fuga, garantizado por RLS</h2>
+    <div class="cols c2">
+      <div class="card" style="border-color:rgba(91,232,138,.3)">
+        <h4>Postgres (6 tablas tenant-scoped)</h4>
+        <p>Cada tabla con <code>FORCE ROW LEVEL SECURITY</code>. Un usuario solo lee/escribe filas de <b>su org y sus grupos visibles</b>. El <code>org:owner</code> ve todos los grupos de su org; los runs son privados.</p>
+      </div>
+      <div class="card" style="border-color:rgba(139,125,255,.3)">
+        <h4>Storage (bucket <code>houston</code>)</h4>
+        <p>Los objetos viven en <code>{org}/{grupo}/agents/{id}/</code>. Una policy RLS por prefijo espeja exactamente la lógica de las tablas. Los archivos de un tenant son invisibles para otro.</p>
+      </div>
+    </div>
+    <p style="margin-top:16px"><span class="chip ok">leak-test</span> Actúa como Usuario A y afirma: <b>0 filas y 0 objetos</b> de otra org/grupo. Gate automático del MVP.</p>
+  </section>
+
+  <!-- 7 — RBAC -->
+  <section class="slide">
+    <div class="kicker">RBAC</div>
+    <h2>Cada operación, su rol — y un <span class="grad">403</span> si no</h2>
+    <table>
+      <tr><th>Operación</th><th>owner</th><th>manager</th><th>member</th></tr>
+      <tr><td>CRUD de grupos</td><td class="yes">✓</td><td class="no">403</td><td class="no">403</td></tr>
+      <tr><td>CRUD de agentes</td><td class="yes">✓ todo el org</td><td class="yes">✓ su grupo</td><td class="no">403</td></tr>
+      <tr><td>Correr agentes</td><td class="yes">✓</td><td class="yes">✓ su grupo</td><td class="yes">✓ su grupo</td></tr>
+      <tr><td>Correr agente de <b>otro grupo/org</b></td><td class="no">404 (RLS)</td><td class="no">404 (RLS)</td><td class="no">404 (RLS)</td></tr>
+      <tr><td>Gestionar API keys</td><td class="yes">✓</td><td class="no">403</td><td class="no">403</td></tr>
+    </table>
+    <p style="margin-top:14px">El rol se enforce en el middleware Go (<code>RequireRole</code>); el acceso cross-grupo lo enforce la RLS. Un <b>rbac-test automático</b> verifica toda la matriz como comportamiento HTTP observable.</p>
+  </section>
+
+  <!-- 8 — AGENTE LIFECYCLE -->
+  <section class="slide">
+    <div class="kicker">El agente</div>
+    <h2>Crear → Correr</h2>
+    <div class="cols c2">
+      <div class="card">
+        <h4>1 · Crear <code>POST /v1/agents</code></h4>
+        <p>4 fuentes: <b>blank</b>, <b>template</b>, <b>ai-assist</b> (Claude genera el CLAUDE.md), <b>github</b>. Nace scoped a org+grupo: fila en <code>agents</code> + <code>CLAUDE.md</code> en Storage.</p>
+      </div>
+      <div class="card" style="border-color:rgba(255,126,182,.35)">
+        <h4>2 · Correr <code>POST /v1/agents/{id}/runs</code></h4>
+        <p>Verifica acceso (RLS) → workspace aislado <code>/tmp/houston-run-{uuid}/</code> → <b>baja el contexto desde Storage</b> → lanza <b>Claude Code real</b> con la API key inyectada → captura la salida → persiste el run. Concurrente.</p>
+      </div>
+    </div>
+    <p style="margin-top:16px">"Crear un agente y correrlo" es el demo central del MVP — y funciona <b>end-to-end</b>, con una sesión real de Claude leyendo el contexto del tenant.</p>
+  </section>
+
+  <!-- 9 — DEMO -->
+  <section class="slide">
+    <div class="kicker">Demo en vivo</div>
+    <h2>El flujo e2e (Postman)</h2>
+    <div class="cols c3">
+      <div class="card"><h3>1 · Auth</h3><p>3 usuarios reales se loguean (JWT ES256 de Supabase).</p></div>
+      <div class="card"><h3>2 · RBAC</h3><p>Member intenta crear agente → <span style="color:var(--red);font-weight:700">403</span>.</p></div>
+      <div class="card"><h3>3 · Crear</h3><p>Manager crea un agente → <span style="color:var(--green);font-weight:700">201</span>.</p></div>
+      <div class="card" style="border-color:rgba(255,126,182,.4)"><h3>4 · ⭐ Correr</h3><p>Claude Code levanta y responde con el contexto del tenant.</p></div>
+      <div class="card"><h3>5 · Aislamiento</h3><p>Cross-org → <span style="color:var(--red);font-weight:700">404</span>; data-level → solo su org.</p></div>
+      <div class="card" style="border-color:rgba(53,224,210,.35)"><h3>✓ Asserts</h3><p>Cada paso con tests verdes — la demo se valida sola.</p></div>
+    </div>
+    <p style="margin-top:14px">Colección lista en <code>demo/houston2-e2e.postman_collection.json</code> · guión en <code>demo/DEMO_RUNBOOK.md</code>.</p>
+  </section>
+
+  <!-- 10 — SEGURIDAD -->
+  <section class="slide">
+    <div class="kicker">Seguridad &amp; confianza</div>
+    <h2>Pensado para datos de clientes</h2>
+    <div class="cols c2">
+      <div class="card"><h4>RLS como garantía</h4><p>No app-layer filtering: la base de datos es la fuente de verdad del aislamiento.</p></div>
+      <div class="card"><h4>Nunca service_role en paths de usuario</h4><p>Todo I/O usa el JWT del usuario; la RLS siempre activa.</p></div>
+      <div class="card"><h4>Auth real (ES256/JWKS)</h4><p>Valida tokens asimétricos de Supabase (Google SSO), no solo el secreto legacy.</p></div>
+      <div class="card"><h4>BYOA — Bring Your Own API key</h4><p>La key de Anthropic por org, inyectada al subprocess; cifrado per-org en el roadmap.</p></div>
+    </div>
+  </section>
+
+  <!-- 11 — QUE CONSTRUIMOS -->
+  <section class="slide">
+    <div class="kicker">Lo construido</div>
+    <h2>El stack, capa por capa</h2>
+    <div class="cols c4">
+      <div class="card"><h3>Datos</h3><p>Schema · RLS Postgres · Storage RLS</p></div>
+      <div class="card"><h3>Identidad</h3><p>Google SSO PKCE · JWKS ES256</p></div>
+      <div class="card"><h3>Control</h3><p>RBAC middleware · orquestador <code>/v1/*</code></p></div>
+      <div class="card"><h3>Flujos</h3><p>create-agent · <b>run-agent (Claude)</b></p></div>
+    </div>
+    <div style="margin-top:18px">
+      <span class="chip ok">✓ leak-test gate</span>
+      <span class="chip ok">✓ rbac-test gate</span>
+      <span class="chip ok">✓ fixture determinista</span>
+      <span class="chip warn">⏳ credenciales cifradas (roadmap)</span>
+      <span class="chip warn">⏳ CRUD groups/memberships</span>
+    </div>
+  </section>
+
+  <!-- 12 — RIGOR -->
+  <section class="slide">
+    <div class="kicker">Cómo lo construimos</div>
+    <h2>Rigor de ingeniería</h2>
+    <div class="cols c2">
+      <div class="card"><h4>Spec-as-source + TDD</h4><p>Cada cambio de código exige una spec; los tests se escriben antes de implementar. 3 niveles: unit / integration / acceptance.</p></div>
+      <div class="card" style="border-color:rgba(255,194,75,.3)"><h4>Correrlo de verdad caza bugs</h4><p>El e2e contra Supabase real destapó <b>4 bugs</b> que los tests mockeados no veían (policy de Storage, lectura de templates, validación de tokens asimétricos, recursión de RLS) — todos arreglados y deployados.</p></div>
+    </div>
+    <p style="margin-top:14px">La invariante de aislamiento no es un comentario: es un test que rompe el build si se viola.</p>
+  </section>
+
+  <!-- 13 — ROADMAP -->
+  <section class="slide">
+    <div class="kicker">Hacia adelante</div>
+    <h2>Roadmap</h2>
+    <div class="cols c3">
+      <div class="card"><h4>Corto</h4><ul class="clean"><li>Wiring de credenciales cifradas (BYOA completo)</li><li>CRUD de grupos y miembros</li></ul></div>
+      <div class="card"><h4>Medio</h4><ul class="clean"><li>Streaming de tokens (WebSocket)</li><li>Compartir contexto controlado entre grupos</li></ul></div>
+      <div class="card"><h4>Plataforma</h4><ul class="clean"><li>Sandboxes efímeros en cloud</li><li>RAG / pgvector sobre el contexto</li></ul></div>
+    </div>
+  </section>
+
+  <!-- 14 — CIERRE -->
+  <section class="slide">
+    <div class="pill">El resultado</div>
+    <div class="quote">Houston pasa de single-tenant a una <span class="grad">plataforma B2B multi-tenant</span> — con aislamiento garantizado por datos y agentes que corren Claude Code real, sin perder lo que ya funciona.</div>
+    <p style="margin-top:22px">Gracias. ¿Pasamos a la demo en vivo?</p>
+  </section>
+
+</div>
+
+<div class="foot">
+  <div>Houston 2.0 · tenant + Supabase + Claude Code</div>
+  <div class="dots" id="dots"></div>
+</div>
+<div class="hint">← → para navegar</div>
+
+<script>
+  const slides = [...document.querySelectorAll('.slide')];
+  const dotsWrap = document.getElementById('dots');
+  const bar = document.getElementById('bar');
+  let i = 0;
+  slides.forEach((_, n) => {
+    const d = document.createElement('div'); d.className = 'dot';
+    d.onclick = () => go(n); dotsWrap.appendChild(d);
+  });
+  const dots = [...document.querySelectorAll('.dot')];
+  function go(n){
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach((s, k) => s.classList.toggle('active', k === i));
+    dots.forEach((d, k) => d.classList.toggle('on', k === i));
+    bar.style.width = ((i + 1) / slides.length * 100) + '%';
+  }
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') go(i + 1);
+    if (e.key === 'ArrowLeft' || e.key === 'PageUp') go(i - 1);
+    if (e.key === 'Home') go(0);
+    if (e.key === 'End') go(slides.length - 1);
+  });
+  document.getElementById('deck').addEventListener('click', e => {
+    if (e.target.closest('.dot')) return;
+    go(i + 1);
+  });
+  go(0);
+</script>
+</body>
+</html>
